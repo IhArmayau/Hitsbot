@@ -1,6 +1,5 @@
 import asyncio
 import ccxt.async_support as ccxt
-import aiohttp
 import pandas as pd
 import ta
 import logging
@@ -9,6 +8,7 @@ from datetime import datetime, timezone
 from flask import Flask
 from dotenv import load_dotenv
 from threading import Thread
+import aiohttp
 
 # -----------------------------
 # LOAD ENV VARIABLES
@@ -19,10 +19,16 @@ load_dotenv()
 # CONFIGURATION
 # -----------------------------
 CONFIG = {
-    "symbols": ["ETHUSD", "INJUSD", "ADAUSD", "XPLUSD", "XRPUSD"],  # Perpetual futures symbols
+    "symbols": [
+        "ETH/USDT:USDT", 
+        "INJ/USDT:USDT", 
+        "ADA/USDT:USDT", 
+        "XPL/USDT:USDT", 
+        "XRP/USDT:USDT"
+    ],  # KuCoin perpetual futures symbols
     "timeframe": os.getenv("TIMEFRAME", "1h"),  # 1m, 5m, 15m, 1h, 4h, 1d
-    "limit": 100,
-    "poll_interval_sec": 900,
+    "limit": 100,  # Number of candles to fetch
+    "poll_interval_sec": 900,  # 15 minutes
     "telegram": {
         "bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
         "chat_id": os.getenv("TELEGRAM_CHAT_ID")
@@ -100,7 +106,7 @@ def save_signal(signal):
     logging.info(f"Saved signal: {signal['symbol']} {signal['signal']}")
 
 # -----------------------------
-# FETCH OHLCV FROM KUCOIN PERPETUALS
+# FETCH OHLCV FROM KUCOIN FUTURES
 # -----------------------------
 async def fetch_ohlcv(exchange, symbol):
     try:
@@ -140,7 +146,7 @@ def generate_signal(df, symbol):
 # MAIN BOT LOOP
 # -----------------------------
 async def bot_loop():
-    exchange = ccxt.kucoinfutures()  # KuCoin Futures client
+    exchange = ccxt.kucoinfutures({"enableRateLimit": True})
     async with aiohttp.ClientSession() as session:
         while True:
             for symbol in CONFIG["symbols"]:
