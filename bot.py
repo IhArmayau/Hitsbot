@@ -71,12 +71,24 @@ pool_skip_until = {}
 # -----------------------------
 app = Flask(__name__)
 @app.route("/")
-def home(): 
+def home():
     return "DEX Perpetual Signal Bot is running! 🤖"
 
 def run_flask():
-    logging.info("Starting Flask web server on port 10000...")
+    logging.info("✅ Flask web server running on port 10000...")
     app.run(host="0.0.0.0", port=10000)
+
+# -----------------------------
+# CHECK ENVIRONMENT VARIABLES
+# -----------------------------
+def check_env():
+    logging.info("🔍 Checking environment variables...")
+    for var in ["BTC_POOL_ADDRESS", "SOL_POOL_ADDRESS", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]:
+        val = os.environ.get(var)
+        if val:
+            logging.info(f"{var} = SET ({val[:6]}...)")
+        else:
+            logging.warning(f"{var} = NOT SET ❌")
 
 # -----------------------------
 # UTILITIES
@@ -89,79 +101,74 @@ def load_signals():
             df['candle_time'] = pd.to_datetime(df['candle_time'])
             global signals_memory
             signals_memory = df
-            logging.info(f"Loaded {len(df)} historical signals")
+            logging.info(f"📄 Loaded {len(df)} historical signals from CSV")
         except Exception as e:
-            logging.warning(f"Failed to load CSV: {e}")
+            logging.warning(f"⚠️ Failed to load CSV: {e}")
 
 def save_signal(signal):
     global signals_memory
     signals_memory = pd.concat([signals_memory, pd.DataFrame([signal])], ignore_index=True)
     signals_memory.to_csv(CONFIG['csv_file'], index=False, float_format='%.6f')
-
-def prune_signals():
-    global signals_memory
-    if len(signals_memory) > CONFIG['max_rows']:
-        signals_memory = signals_memory.iloc[-CONFIG['max_rows']:]
-        signals_memory.to_csv(CONFIG['csv_file'], index=False, float_format='%.6f')
+    logging.info(f"💾 Saved new signal: {signal['symbol']} {signal['signal']}")
 
 def is_duplicate(symbol, signal, candle_time):
     candle_time = pd.to_datetime(candle_time).replace(second=0, microsecond=0)
-    return not signals_memory[
+    is_dup = not signals_memory[
         (signals_memory['symbol']==symbol) &
         (signals_memory['signal']==signal) &
         (signals_memory['candle_time']==candle_time)
     ].empty
+    if is_dup:
+        logging.info(f"⚠️ Duplicate detected for {symbol} {signal} at {candle_time}")
+    return is_dup
 
 async def send_telegram(session, message):
     if not CONFIG['telegram']['bot_token'] or not CONFIG['telegram']['chat_id']:
-        logging.warning("Telegram not configured")
+        logging.warning("❌ Telegram not configured, skipping message.")
         return
     url = f"https://api.telegram.org/bot{CONFIG['telegram']['bot_token']}/sendMessage"
     payload = {"chat_id": CONFIG['telegram']['chat_id'], "text": message, "parse_mode": "Markdown"}
     try:
         async with session.post(url, json=payload) as resp:
             if resp.status != 200:
-                logging.warning(f"Telegram failed: {resp.status} - {await resp.text()}")
+                text = await resp.text()
+                logging.warning(f"⚠️ Telegram send failed: {resp.status} - {text}")
+            else:
+                logging.info("✅ Telegram message sent successfully.")
     except Exception as e:
-        logging.error(f"Telegram exception: {e}")
+        logging.error(f"❌ Telegram exception: {e}")
 
 # -----------------------------
 # FETCH OHLCV
 # -----------------------------
 async def fetch_ohlcv(session, network, pool_address, timeframe):
     now = time.time()
-    if pool_address in pool_skip_until and now < pool_skip_until[pool_address]:
-        return ohlcv_cache.get((network,pool_address,timeframe),(0,pd.DataFrame()))[1].copy()
+    if not pool_address:
+        logging.warning(f"❌ Missing pool address for {network}")
+        return pd.DataFrame()
 
-    key = (network,pool_address,timeframe)
-    if key in ohlcv_cache and now - ohlcv_cache[key][0] < CONFIG['cache_ttl_sec']:
-        return ohlcv_cache[key][1].copy()
-
+    url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_address}/ohlcv/{timeframe}"
     async with semaphore:
-        url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_address}/ohlcv/{timeframe}"
         try:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    pool_failures[pool_address] = pool_failures.get(pool_address,0)+1
-                    if pool_failures[pool_address]>=CONFIG['max_failures']:
-                        pool_skip_until[pool_address] = now + CONFIG['skip_duration']
-                    return ohlcv_cache.get(key,(0,pd.DataFrame()))[1].copy()
+                    logging.warning(f"⚠️ OHLCV fetch failed {resp.status} for {pool_address}")
+                    return pd.DataFrame()
                 data = await resp.json()
                 df = pd.DataFrame(data.get("data", {}).get("attributes", {}).get("ohlcv_list", []))
-                if df.empty: return pd.DataFrame()
+                if df.empty:
+                    logging.warning(f"⚠️ Empty OHLCV for {network}/{pool_address}/{timeframe}")
+                    return pd.DataFrame()
                 df.columns = ['timestamp','open','high','low','close','volume']
-                for c in ['open','high','low','close','volume']: df[c]=pd.to_numeric(df[c],errors='coerce')
-                df['timestamp']=pd.to_datetime(df['timestamp'],unit='s')
+                for c in ['open','high','low','close','volume']:
+                    df[c] = pd.to_numeric(df[c], errors='coerce')
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 df.set_index('timestamp', inplace=True)
-                ohlcv_cache[key] = (now, df.copy())
-                pool_failures[pool_address]=0
+                logging.info(f"📊 OHLCV fetched: {pool_address} {timeframe} rows={len(df)}")
                 return df.dropna()
         except Exception as e:
-            pool_failures[pool_address] = pool_failures.get(pool_address,0)+1
-            if pool_failures[pool_address]>=CONFIG['max_failures']:
-                pool_skip_until[pool_address]=now+CONFIG['skip_duration']
-            logging.error(f"fetch_ohlcv exception for {pool_address}: {e}")
-            return ohlcv_cache.get(key,(0,pd.DataFrame()))[1].copy()
+            logging.error(f"❌ Exception fetching OHLCV for {pool_address}: {e}")
+            return pd.DataFrame()
 
 # -----------------------------
 # INDICATORS
@@ -169,142 +176,91 @@ async def fetch_ohlcv(session, network, pool_address, timeframe):
 def add_indicators(df):
     if df.empty: return pd.DataFrame()
     ind = CONFIG['indicators']
-    df['ema_short'] = df['close'].ewm(span=ind['ema_short'], adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=ind['ema_long'], adjust=False).mean()
-    df['ema_trend'] = df['close'].ewm(span=ind['ema_trend'], adjust=False).mean()
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], ind['rsi_period']).rsi()
-    adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], ind['adx_period'])
-    df['adx'] = adx.adx()
-    df['plus_di'] = adx.adx_pos()
-    df['minus_di'] = adx.adx_neg()
-    macd = ta.trend.MACD(df['close'], ind['macd_fast'], ind['macd_slow'], ind['macd_signal'])
-    df['macd'] = macd.macd()
-    df['macd_signal'] = macd.macd_signal()
-    bb = ta.volatility.BollingerBands(df['close'], ind['bb_window'], ind['bb_std'])
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_lower'] = bb.bollinger_lband()
-    df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], ind['atr_period']).average_true_range()
-    return df.dropna()
+    try:
+        df['ema_short'] = df['close'].ewm(span=ind['ema_short'], adjust=False).mean()
+        df['ema_long'] = df['close'].ewm(span=ind['ema_long'], adjust=False).mean()
+        df['rsi'] = ta.momentum.RSIIndicator(df['close'], ind['rsi_period']).rsi()
+        return df.dropna()
+    except Exception as e:
+        logging.error(f"❌ Indicator calculation failed: {e}")
+        return pd.DataFrame()
 
 # -----------------------------
 # SIGNAL LOGIC
 # -----------------------------
 def compute_signal(latest, prev):
     buy = sell = 0
-    if prev['ema_short']<prev['ema_long'] and latest['ema_short']>latest['ema_long']: buy+=20
-    if prev['ema_short']>prev['ema_long'] and latest['ema_short']<latest['ema_long']: sell+=20
-    if prev['macd']<prev['macd_signal'] and latest['macd']>latest['macd_signal']: buy+=20
-    if prev['macd']>prev['macd_signal'] and latest['macd']<latest['macd_signal']: sell+=20
-    if latest['rsi']<CONFIG['indicators']['rsi_oversold']: buy+=20
-    if latest['rsi']>CONFIG['indicators']['rsi_overbought']: sell+=20
-    if latest['adx']>CONFIG['indicators']['adx_threshold']:
-        if latest['plus_di']>latest['minus_di']: buy+=15
-        if latest['minus_di']>latest['plus_di']: sell+=15
-    if latest['close']<latest['bb_lower']: buy+=15
-    if latest['close']>latest['bb_upper']: sell+=15
-    return buy,sell
+    if prev['ema_short'] < prev['ema_long'] and latest['ema_short'] > latest['ema_long']: buy += 20
+    if prev['ema_short'] > prev['ema_long'] and latest['ema_short'] < latest['ema_long']: sell += 20
+    if latest['rsi'] < 40: buy += 20
+    if latest['rsi'] > 60: sell += 20
+    return buy, sell
 
 # -----------------------------
 # COLLECT SIGNALS
 # -----------------------------
 async def collect_signals(session):
-    signals=[]
+    signals = []
     for pool in CONFIG['pools']:
         try:
-            df_entry=add_indicators(await fetch_ohlcv(session,pool['network'],pool['pool_address'],CONFIG['timeframes']['entry']))
-            if df_entry.empty or len(df_entry)<2: continue
-            latest, prev = df_entry.iloc[-1], df_entry.iloc[-2]
+            df = add_indicators(await fetch_ohlcv(session, pool['network'], pool['pool_address'], CONFIG['timeframes']['entry']))
+            if df.empty or len(df) < 2:
+                logging.info(f"ℹ️ Skipping {pool['symbol']} - insufficient data")
+                continue
+            latest, prev = df.iloc[-1], df.iloc[-2]
             buy, sell = compute_signal(latest, prev)
             confidence = max(buy, sell)
-            if confidence < CONFIG['min_confidence']: continue
-            entry_signal = 'BUY' if buy>sell else 'SELL'
-            candle_time = latest.name.replace(second=0, microsecond=0)
-            if is_duplicate(pool['symbol'], entry_signal, candle_time): continue
-
-            # Confirmations 1h & 4h
-            confirmed=True
-            for tf in ['confirmation_1h','confirmation_4h']:
-                df_tf=add_indicators(await fetch_ohlcv(session,pool['network'],pool['pool_address'],CONFIG['timeframes'][tf]))
-                if df_tf.empty or len(df_tf)<2: continue
-                l, p=df_tf.iloc[-1], df_tf.iloc[-2]
-                buy_tf,sell_tf=compute_signal(l,p)
-                signal_tf='BUY' if buy_tf>sell_tf else 'SELL'
-                if signal_tf!=entry_signal: confirmed=False
-            if not confirmed: continue
-
-            # Levels
-            entry_price=latest['close']
-            atr=latest['atr']
-            sl = entry_price-atr*CONFIG['indicators']['atr_sl'] if entry_signal=='BUY' else entry_price+atr*CONFIG['indicators']['atr_sl']
-            tp = entry_price+atr*CONFIG['indicators']['atr_tp'] if entry_signal=='BUY' else entry_price-atr*CONFIG['indicators']['atr_tp']
-
+            if confidence < CONFIG['min_confidence']:
+                logging.info(f"❌ Low confidence {confidence} for {pool['symbol']}")
+                continue
+            entry_signal = 'BUY' if buy > sell else 'SELL'
+            candle_time = latest.name
+            if is_duplicate(pool['symbol'], entry_signal, candle_time):
+                continue
+            entry_price = latest['close']
+            sl = entry_price * (0.99 if entry_signal == 'BUY' else 1.01)
+            tp = entry_price * (1.02 if entry_signal == 'BUY' else 0.98)
             signals.append({
-                'time':datetime.now(timezone.utc),
-                'symbol':pool['symbol'],
-                'signal':entry_signal,
-                'confidence':confidence,
-                'strength':confidence,
-                'entry':entry_price,
-                'sl':sl,
-                'tp':tp,
-                'candle_time':candle_time
+                'time': datetime.now(timezone.utc),
+                'symbol': pool['symbol'],
+                'signal': entry_signal,
+                'confidence': confidence,
+                'strength': confidence,
+                'entry': entry_price,
+                'sl': sl,
+                'tp': tp,
+                'candle_time': candle_time
             })
         except Exception as e:
-            logging.error(f"Error processing {pool['symbol']}: {e}")
-    return sorted(signals,key=lambda x:x['confidence'],reverse=True)[:CONFIG['top_signals']]
+            logging.error(f"❌ Error processing {pool['symbol']}: {e}")
+    return signals
 
 # -----------------------------
-# MARKET STATUS TASK
-# -----------------------------
-async def send_market_status(session):
-    while True:
-        try:
-            for pool in CONFIG['pools']:
-                df=add_indicators(await fetch_ohlcv(session,pool['network'],pool['pool_address'],CONFIG['timeframes']['entry']))
-                if df.empty: continue
-                latest=df.iloc[-1]
-                msg=f"*{pool['symbol']}* | Price: {latest['close']:.6f} | EMA Short: {latest['ema_short']:.6f} | EMA Long: {latest['ema_long']:.6f} | RSI: {latest['rsi']:.2f}"
-                await send_telegram(session,msg)
-        except Exception as e:
-            logging.error(f"Market status update failed: {e}")
-        await asyncio.sleep(CONFIG['status_interval_sec'])
-
-# -----------------------------
-# MAIN BOT LOOP
+# MAIN LOOP
 # -----------------------------
 async def run_bot(session):
     load_signals()
     while True:
-        try:
-            for pool_addr in list(pool_skip_until):
-                if time.time()>=pool_skip_until[pool_addr]:
-                    logging.info(f"Resuming pool {pool_addr}")
-                    del pool_skip_until[pool_addr]
-                    pool_failures[pool_addr]=0
-            signals=await collect_signals(session)
-            logging.info(f"Cycle complete. {len(signals)} top signals found.")
-            for s in signals:
-                msg=f"*{s['symbol']}* | *{s['signal']}* | Entry: {s['entry']:.6f} | SL: {s['sl']:.6f} | TP: {s['tp']:.6f} | Confidence: {s['confidence']}%"
-                logging.info(msg)
-                await send_telegram(session,msg)
-                save_signal(s)
-            prune_signals()
-        except Exception as e:
-            logging.error(f"Critical exception: {e}")
+        logging.info("🔁 Starting new scan cycle...")
+        signals = await collect_signals(session)
+        logging.info(f"Cycle complete. Found {len(signals)} signal(s).")
+        for s in signals:
+            msg = f"*{s['symbol']}* | *{s['signal']}* | Entry: {s['entry']:.4f} | SL: {s['sl']:.4f} | TP: {s['tp']:.4f} | Confidence: {s['confidence']}%"
+            logging.info(msg)
+            await send_telegram(session, msg)
+            save_signal(s)
         await asyncio.sleep(CONFIG['poll_interval_sec'])
 
 # -----------------------------
 # START BOT AND FLASK
 # -----------------------------
 async def main():
+    check_env()
     async with aiohttp.ClientSession() as session:
-        await asyncio.gather(
-            run_bot(session),
-            send_market_status(session)
-        )
+        await asyncio.gather(run_bot(session), return_exceptions=True)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(1)
-    logging.info("Starting DEX Perpetual Signal Bot (15m/1h/4h)...")
+    logging.info("🚀 Starting DEX Signal Bot with Debug Logs Enabled...")
     asyncio.run(main())
