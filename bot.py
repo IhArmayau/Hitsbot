@@ -21,8 +21,8 @@ load_dotenv()
 CONFIG = {
     "pools": [
         {"symbol": "ETH/USDT", "network": "eth", "pool_address": os.environ.get("ETH_POOL_ADDRESS")},
-        {"symbol": "INJ/USDT", "network": "eth", "pool_address": os.environ.get("INJ_POOL_ADDRESS")},
-        {"symbol": "ADA/USDT", "network": "eth", "pool_address": os.environ.get("ADA_POOL_ADDRESS")},
+        {"symbol": "INJ/USDT", "network": "arbitrum", "pool_address": os.environ.get("INJ_POOL_ADDRESS")},
+        {"symbol": "ADA/USDT", "network": "bsc", "pool_address": os.environ.get("ADA_POOL_ADDRESS")},
         {"symbol": "XPL/USDT", "network": "eth", "pool_address": os.environ.get("XPL_POOL_ADDRESS")},
         {"symbol": "XRP/USDT", "network": "eth", "pool_address": os.environ.get("XRP_POOL_ADDRESS")},
     ],
@@ -59,7 +59,6 @@ CONFIG = {
 # LOGGING & GLOBALS
 # -----------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 signals_memory = pd.DataFrame(columns=[
     'time','symbol','signal','confidence','strength','entry','sl','tp','candle_time'
 ])
@@ -100,7 +99,6 @@ def load_signals():
     if not os.path.exists(CONFIG['csv_file']):
         logging.info("No existing signals.csv found — starting fresh.")
         return
-
     try:
         df = pd.read_csv(CONFIG['csv_file'])
         df['time'] = pd.to_datetime(df['time'], errors='coerce').fillna(pd.Timestamp.now(tz=timezone.utc))
