@@ -3,11 +3,11 @@ import aiohttp
 import pandas as pd
 import ta
 import logging
-import os
 from datetime import datetime, timezone
 from flask import Flask
 from dotenv import load_dotenv
-from threading import Thread
+import os
+from binance import AsyncClient
 
 # -----------------------------
 # LOAD ENV VARIABLES
@@ -19,13 +19,13 @@ load_dotenv()
 # -----------------------------
 CONFIG = {
     "pools": [
-        {"symbol": "ETH/USDT", "network": "eth", "pool_address": os.environ.get("ETH_POOL_ADDRESS")},
-        {"symbol": "INJ/USDT", "network": "arbitrum", "pool_address": os.environ.get("INJ_POOL_ADDRESS")},
-        {"symbol": "ADA/USDT", "network": "bsc", "pool_address": os.environ.get("ADA_POOL_ADDRESS")},
-        {"symbol": "XPL/USDT", "network": "eth", "pool_address": os.environ.get("XPL_POOL_ADDRESS")},
-        {"symbol": "XRP/USDT", "network": "eth", "pool_address": os.environ.get("XRP_POOL_ADDRESS")},
+        {"symbol_env": os.environ.get("ETH_SYMBOL")},
+        {"symbol_env": os.environ.get("INJ_SYMBOL")},
+        {"symbol_env": os.environ.get("ADA_SYMBOL")},
+        {"symbol_env": os.environ.get("XPL_SYMBOL")},
+        {"symbol_env": os.environ.get("XRP_SYMBOL")},
     ],
-    "timeframe": os.environ.get("TIMEFRAME", "hour"),  # Allowed: day, hour, minute, second
+    "timeframe": os.environ.get("TIMEFRAME", "1h"),  # Binance interval: 1m, 5m, 15m, 1h, 4h, 1d
     "telegram": {
         "bot_token": os.environ.get("TELEGRAM_BOT_TOKEN"),
         "chat_id": os.environ.get("TELEGRAM_CHAT_ID")
@@ -38,7 +38,6 @@ CONFIG = {
 # LOGGING
 # -----------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger()
 
 # -----------------------------
 # GLOBALS
@@ -46,7 +45,6 @@ logger = logging.getLogger()
 signals_memory = pd.DataFrame(columns=[
     'time','symbol','signal','entry','sl','tp','candle_time'
 ])
-ohlcv_cache = {}
 
 # -----------------------------
 # FLASK SERVER FOR UPTIME
@@ -61,25 +59,25 @@ def run_flask():
     app.run(host="0.0.0.0", port=10000)
 
 # -----------------------------
-# TELEGRAM
+# TELEGRAM INTEGRATION
 # -----------------------------
 async def send_telegram(session, message):
     token = CONFIG["telegram"]["bot_token"]
     chat_id = CONFIG["telegram"]["chat_id"]
     if not token or not chat_id:
-        logger.warning("Telegram not configured, skipping message")
+        logging.warning("Telegram not configured, skipping message")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
     try:
         async with session.post(url, json=payload) as resp:
             if resp.status == 200:
-                logger.info("Telegram message sent ✅")
+                logging.info("Telegram message sent ✅")
             else:
                 text = await resp.text()
-                logger.warning(f"Telegram send failed: {resp.status} {text}")
+                logging.warning(f"Telegram send failed: {resp.status} {text}")
     except Exception as e:
-        logger.error(f"Telegram error: {e}")
+        logging.error(f"Telegram error: {e}")
 
 # -----------------------------
 # LOAD & SAVE SIGNALS
@@ -92,37 +90,38 @@ def load_signals():
             df["time"] = pd.to_datetime(df["time"], errors='coerce')
             df["candle_time"] = pd.to_datetime(df["candle_time"], errors='coerce')
             signals_memory = df
-            logger.info(f"Loaded {len(df)} signals from CSV")
+            logging.info(f"Loaded {len(df)} signals from CSV")
         except Exception as e:
-            logger.warning(f"Failed to load CSV: {e}")
+            logging.warning(f"Failed to load CSV: {e}")
 
 def save_signal(signal):
     global signals_memory
     signals_memory = pd.concat([signals_memory, pd.DataFrame([signal])], ignore_index=True)
     signals_memory.to_csv(CONFIG["csv_file"], index=False)
-    logger.info(f"Saved signal: {signal['symbol']} {signal['signal']}")
+    logging.info(f"Saved signal: {signal['symbol']} {signal['signal']}")
 
 # -----------------------------
-# FETCH OHLCV FROM GeckoTerminal
+# FETCH OHLCV FROM BINANCE
 # -----------------------------
-async def fetch_ohlcv(session, network, pool_address, timeframe):
-    url = f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{pool_address}/ohlcv/{timeframe}"
+async def fetch_ohlcv(client, symbol, interval):
+    """
+    Fetch OHLCV data from Binance.
+    Returns a DataFrame with timestamp, open, high, low, close, volume.
+    """
     try:
-        async with session.get(url, timeout=15) as resp:
-            if resp.status != 200:
-                logger.warning(f"GeckoTerminal {resp.status} for {pool_address}")
-                return pd.DataFrame()
-            data = await resp.json()
-            ohlcv_list = data.get("data", {}).get("items", [])
-            if not ohlcv_list:
-                return pd.DataFrame()
-            df = pd.DataFrame(ohlcv_list)
-            df["timestamp"] = pd.to_datetime(df["time"], unit='s')
-            df.set_index("timestamp", inplace=True)
-            df = df[["open","high","low","close","volume"]].astype(float)
-            return df
+        klines = await client.get_klines(symbol=symbol, interval=interval, limit=500)
+        df = pd.DataFrame(klines, columns=[
+            "timestamp","open","high","low","close","volume",
+            "close_time","quote_asset_volume","number_of_trades",
+            "taker_buy_base_asset_volume","taker_buy_quote_asset_volume","ignore"
+        ])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
+        df.set_index("timestamp", inplace=True)
+        for col in ["open","high","low","close","volume"]:
+            df[col] = pd.to_numeric(df[col])
+        return df[["open","high","low","close","volume"]]
     except Exception as e:
-        logger.error(f"OHLCV fetch error: {e}")
+        logging.error(f"Binance fetch error for {symbol}: {e}")
         return pd.DataFrame()
 
 # -----------------------------
@@ -152,17 +151,19 @@ def generate_signal(df, symbol):
 # MAIN LOOP
 # -----------------------------
 async def bot_loop():
+    client = await AsyncClient.create()
     async with aiohttp.ClientSession() as session:
         while True:
             for pool in CONFIG["pools"]:
-                df = await fetch_ohlcv(session, pool["network"], pool["pool_address"], CONFIG["timeframe"])
+                symbol = pool["symbol_env"]
+                df = await fetch_ohlcv(client, symbol, CONFIG["timeframe"])
                 df = compute_indicators(df)
-                signal = generate_signal(df, pool["symbol"])
+                signal = generate_signal(df, symbol)
                 if signal:
                     candle_time = df.index[-1]
                     sig_data = {
                         "time": datetime.now(timezone.utc),
-                        "symbol": pool["symbol"],
+                        "symbol": symbol,
                         "signal": signal,
                         "entry": df["close"].iloc[-1],
                         "sl": df["close"].iloc[-1]*0.98 if signal=="BUY" else df["close"].iloc[-1]*1.02,
@@ -170,7 +171,7 @@ async def bot_loop():
                         "candle_time": candle_time
                     }
                     save_signal(sig_data)
-                    await send_telegram(session, f"{signal} signal for {pool['symbol']} at {sig_data['entry']}")
+                    await send_telegram(session, f"{signal} signal for {symbol} at {sig_data['entry']}")
             await asyncio.sleep(CONFIG["poll_interval_sec"])
 
 # -----------------------------
@@ -178,5 +179,8 @@ async def bot_loop():
 # -----------------------------
 if __name__ == "__main__":
     load_signals()
+    # Start Flask server in background
+    from threading import Thread
     Thread(target=run_flask, daemon=True).start()
+    # Start async bot
     asyncio.run(bot_loop())
