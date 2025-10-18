@@ -27,9 +27,9 @@ CONFIG = {
         {"symbol": "XRP/USDT", "network": "eth", "pool_address": os.environ.get("XRP_POOL_ADDRESS")},
     ],
     "timeframes": {
-        "entry": "15m",
-        "confirmation_1h": "1h",
-        "confirmation_4h": "4h"
+        "entry": "minute",           # fetch 1-minute candles from GeckoTerminal
+        "confirmation_1h": "hour",
+        "confirmation_4h": "hour"    # resample to 4H in code
     },
     "indicators": {
         "ema_short": 9, "ema_long": 21, "ema_trend": 50,
@@ -59,6 +59,7 @@ CONFIG = {
 # LOGGING & GLOBALS
 # -----------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 signals_memory = pd.DataFrame(columns=[
     'time','symbol','signal','confidence','strength','entry','sl','tp','candle_time'
 ])
@@ -161,9 +162,9 @@ async def send_telegram(session, message):
         logging.error(f"❌ Telegram exception: {e}")
 
 # -----------------------------
-# FETCH OHLCV (GeckoTerminal)
+# FETCH OHLCV (GeckoTerminal) WITH RESAMPLING
 # -----------------------------
-async def fetch_ohlcv(session, network, pool_address, timeframe):
+async def fetch_ohlcv(session, network, pool_address, timeframe, resample_to=None):
     now = time.time()
     if not pool_address:
         logging.warning(f"❌ Missing pool address for {network}. Skipping.")
@@ -185,6 +186,16 @@ async def fetch_ohlcv(session, network, pool_address, timeframe):
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
                 df.set_index("timestamp", inplace=True)
                 df = df.dropna().sort_index()
+
+                if resample_to:
+                    df = df.resample(resample_to).agg({
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum"
+                    }).dropna()
+
                 ohlcv_cache[key] = (now, df.copy())
                 return df
         except Exception as e:
@@ -231,7 +242,9 @@ def compute_signal(latest, prev):
 async def collect_signals(session):
     signals = []
     for pool in CONFIG["pools"]:
-        df_entry = add_indicators(await fetch_ohlcv(session, pool["network"], pool["pool_address"], CONFIG["timeframes"]["entry"]))
+        df_entry = add_indicators(await fetch_ohlcv(
+            session, pool["network"], pool["pool_address"], CONFIG["timeframes"]["entry"], resample_to="15T"
+        ))
         if df_entry.empty or len(df_entry) < 2:
             continue
         latest, prev = df_entry.iloc[-1], df_entry.iloc[-2]
