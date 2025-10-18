@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timezone
 from flask import Flask
 from dotenv import load_dotenv
+from threading import Thread
 
 # -----------------------------
 # LOAD ENV VARIABLES
@@ -24,19 +25,20 @@ CONFIG = {
         {"symbol": "XPL/USDT", "network": "eth", "pool_address": os.environ.get("XPL_POOL_ADDRESS")},
         {"symbol": "XRP/USDT", "network": "eth", "pool_address": os.environ.get("XRP_POOL_ADDRESS")},
     ],
-    "timeframe": "hour",  # Allowed: day, hour, minute, second
+    "timeframe": os.environ.get("TIMEFRAME", "hour"),  # Allowed: day, hour, minute, second
     "telegram": {
         "bot_token": os.environ.get("TELEGRAM_BOT_TOKEN"),
         "chat_id": os.environ.get("TELEGRAM_CHAT_ID")
     },
     "csv_file": "signals.csv",
-    "poll_interval_sec": 900
+    "poll_interval_sec": 900  # 15 minutes
 }
 
 # -----------------------------
 # LOGGING
 # -----------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
 
 # -----------------------------
 # GLOBALS
@@ -65,19 +67,19 @@ async def send_telegram(session, message):
     token = CONFIG["telegram"]["bot_token"]
     chat_id = CONFIG["telegram"]["chat_id"]
     if not token or not chat_id:
-        logging.warning("Telegram not configured, skipping message")
+        logger.warning("Telegram not configured, skipping message")
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
     try:
         async with session.post(url, json=payload) as resp:
             if resp.status == 200:
-                logging.info("Telegram message sent ✅")
+                logger.info("Telegram message sent ✅")
             else:
                 text = await resp.text()
-                logging.warning(f"Telegram send failed: {resp.status} {text}")
+                logger.warning(f"Telegram send failed: {resp.status} {text}")
     except Exception as e:
-        logging.error(f"Telegram error: {e}")
+        logger.error(f"Telegram error: {e}")
 
 # -----------------------------
 # LOAD & SAVE SIGNALS
@@ -90,15 +92,15 @@ def load_signals():
             df["time"] = pd.to_datetime(df["time"], errors='coerce')
             df["candle_time"] = pd.to_datetime(df["candle_time"], errors='coerce')
             signals_memory = df
-            logging.info(f"Loaded {len(df)} signals from CSV")
+            logger.info(f"Loaded {len(df)} signals from CSV")
         except Exception as e:
-            logging.warning(f"Failed to load CSV: {e}")
+            logger.warning(f"Failed to load CSV: {e}")
 
 def save_signal(signal):
     global signals_memory
     signals_memory = pd.concat([signals_memory, pd.DataFrame([signal])], ignore_index=True)
     signals_memory.to_csv(CONFIG["csv_file"], index=False)
-    logging.info(f"Saved signal: {signal['symbol']} {signal['signal']}")
+    logger.info(f"Saved signal: {signal['symbol']} {signal['signal']}")
 
 # -----------------------------
 # FETCH OHLCV FROM GeckoTerminal
@@ -108,18 +110,19 @@ async def fetch_ohlcv(session, network, pool_address, timeframe):
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
-                logging.warning(f"GeckoTerminal {resp.status} for {pool_address}")
+                logger.warning(f"GeckoTerminal {resp.status} for {pool_address}")
                 return pd.DataFrame()
             data = await resp.json()
-            ohlcv_list = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+            ohlcv_list = data.get("data", {}).get("items", [])
             if not ohlcv_list:
                 return pd.DataFrame()
-            df = pd.DataFrame(ohlcv_list, columns=["timestamp","open","high","low","close","volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+            df = pd.DataFrame(ohlcv_list)
+            df["timestamp"] = pd.to_datetime(df["time"], unit='s')
             df.set_index("timestamp", inplace=True)
+            df = df[["open","high","low","close","volume"]].astype(float)
             return df
     except Exception as e:
-        logging.error(f"OHLCV fetch error: {e}")
+        logger.error(f"OHLCV fetch error: {e}")
         return pd.DataFrame()
 
 # -----------------------------
@@ -175,8 +178,5 @@ async def bot_loop():
 # -----------------------------
 if __name__ == "__main__":
     load_signals()
-    # Start Flask server in background
-    from threading import Thread
     Thread(target=run_flask, daemon=True).start()
-    # Start async bot
     asyncio.run(bot_loop())
