@@ -1,8 +1,17 @@
+# Exchange & Async Operations
 ccxt>=2.0.67
-pandas>=2.1.0
-ta>=0.10.2
-flask>=2.3.5
-python-dotenv>=1.0.0
 aiohttp>=3.9.5
 aiofiles>=23.1.0
+
+# Data Processing & Indicators
+pandas>=2.1.0
+ta>=0.10.2
+numpy>=1.26.4
+
+# Web Server & Environment
+flask>=2.3.5
 gunicorn>=21.2.0
+python-dotenv>=1.0.0
+
+# Optional Monitoring (safe to remove if not needed)
+prometheus-client>=0.20.0
