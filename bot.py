@@ -25,11 +25,11 @@ load_dotenv()
 # -----------------------------
 CONFIG = {
     "symbols": [
-        "ETH/USDT",
-        "INJ/USDT",
-        "ADA/USDT",
-        "XPL/USDT",
-        "XRP/USDT"
+        "ETH/USDT:USDT",
+        "INJ/USDT:USDT",
+        "ADA/USDT:USDT",
+        "XPL/USDT:USDT",
+        "XRP/USDT:USDT"
     ],
     "timeframe": os.getenv("TIMEFRAME", "1h"),
     "limit": 100,
@@ -82,6 +82,10 @@ def home():
 @app.route("/status")
 def status():
     return jsonify(signals_memory.tail(10).to_dict(orient='records'))
+
+@app.route("/ping")
+def ping():
+    return "pong"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -194,8 +198,8 @@ class SignalBot:
         highs = df['high'].iloc[-lookback-1:]
         lows = df['low'].iloc[-lookback-1:]
         match_count = sum(
-            (highs.iloc[i] > highs.iloc[i-1] and lows.iloc[i] > lows.iloc[i-1]) if trend=="BUY" else
-            (lows.iloc[i] < lows.iloc[i-1] and highs.iloc[i] < highs.iloc[i-1])
+            (highs.iloc[i]>highs.iloc[i-1] and lows.iloc[i]>lows.iloc[i-1]) if trend=="BUY" else
+            (lows.iloc[i]<lows.iloc[i-1] and highs.iloc[i]<highs.iloc[i-1])
             for i in range(1,len(highs))
         )
         if match_count/lookback < self.config.get("smc_threshold",0.8)*0.9: return None
@@ -278,6 +282,10 @@ def load_signals():
     if os.path.exists(CONFIG["csv_file"]):
         try:
             df = pd.read_csv(CONFIG["csv_file"])
+            # Ensure required columns exist
+            for col in ['time', 'candle_time']:
+                if col not in df.columns:
+                    df[col] = pd.NaT
             df["time"] = pd.to_datetime(df["time"], errors='coerce')
             df["candle_time"] = pd.to_datetime(df["candle_time"], errors='coerce')
             signals_memory = df
@@ -285,21 +293,11 @@ def load_signals():
             logging.info(f"Loaded {len(df)} signals from CSV")
         except Exception as e:
             logging.warning(f"Failed to load CSV: {e}")
-
-# -----------------------------
-# KEEP-ALIVE TASK
-# -----------------------------
-async def keep_alive():
-    while bot.running:
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = os.environ.get("KEEP_ALIVE_URL")
-                if url:
-                    async with session.get(url, timeout=10) as resp:
-                        logging.info(f"Keep-alive ping status: {resp.status}")
-        except:
-            pass
-        await asyncio.sleep(240)  # ping every 4 minutes
+            signals_memory = pd.DataFrame(columns=signals_memory.columns)
+            bot.signals_memory = signals_memory
+    else:
+        signals_memory = pd.DataFrame(columns=signals_memory.columns)
+        bot.signals_memory = signals_memory
 
 # -----------------------------
 # MAIN BOT LOOP
@@ -308,7 +306,6 @@ async def bot_loop():
     async with aiohttp.ClientSession() as session:
         bot.session = session
         telegram_task = asyncio.create_task(bot._telegram_worker())
-        keep_alive_task = asyncio.create_task(keep_alive())
         while bot.running:
             new_signal_generated = False
             for symbol in CONFIG['symbols']:
@@ -328,10 +325,8 @@ async def bot_loop():
         if bot.session:
             await bot.session.close()
         telegram_task.cancel()
-        keep_alive_task.cancel()
         try:
             await telegram_task
-            await keep_alive_task
         except asyncio.CancelledError:
             pass
 
