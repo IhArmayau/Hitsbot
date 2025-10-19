@@ -5,3 +5,4 @@ flask>=2.3.5
 python-dotenv>=1.0.0
 aiohttp>=3.9.5
 aiofiles>=23.1.0
+gunicorn>=21.2.0

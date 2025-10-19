@@ -87,6 +87,12 @@ def status():
 def ping():
     return "pong"
 
+# ✅ Added heartbeat route for uptime monitoring
+@app.route("/heartbeat")
+def heartbeat():
+    logging.info(f"Heartbeat ping at {datetime.utcnow()}")
+    return "Alive"
+
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
@@ -106,7 +112,7 @@ class SignalBot:
         self.session = None
         self.telegram_queue = asyncio.Queue()
         self.running = True
-        self.last_signal_per_symbol = {}  # For duplicate prevention
+        self.last_signal_per_symbol = {}
 
     # -----------------------------
     # TELEGRAM
@@ -192,7 +198,6 @@ class SignalBot:
         if trend=="BUY" and latest["rsi"]>rsi_overbought: return None
         if trend=="SELL" and latest["rsi"]<rsi_oversold: return None
 
-        # SMC check
         lookback = self.config.get("smc_lookback_structure",5)
         if len(df) < lookback+1: return None
         highs = df['high'].iloc[-lookback-1:]
@@ -204,7 +209,6 @@ class SignalBot:
         )
         if match_count/lookback < self.config.get("smc_threshold",0.8)*0.9: return None
 
-        # SL/TP
         atr_ratio = latest['atr'] / df['close'].rolling(14).mean().iloc[-1]
         sl_distance = latest['atr'] * ind['atr_sl_mult'] * (1 + atr_ratio)
         tp_distance = latest['atr'] * ind['atr_tp_mult'] * (1 + atr_ratio)
@@ -212,10 +216,8 @@ class SignalBot:
         sl = entry - sl_distance if trend=="BUY" else entry + sl_distance
         tp = entry + tp_distance if trend=="BUY" else entry - tp_distance
 
-        # R/R ratio
         rr = (tp - entry)/abs(entry-sl) if trend=="BUY" else (entry-tp)/abs(sl-entry)
 
-        # Confidence
         confidence = min(max(abs(latest['ema_short']-latest['ema_long'])/latest['close']*100*10 +
             (50 if trend=="BUY" and latest['rsi']>50 else 50 if trend=="SELL" and latest['rsi']<50 else 0),0),100)
         if confidence < self.config['confidence_threshold']: return None
@@ -234,7 +236,6 @@ class SignalBot:
             "rr": round(rr,2)
         }
 
-        # Prevent duplicate
         last_signal = self.last_signal_per_symbol.get(symbol)
         if last_signal and last_signal['signal'] == signal['signal'] and last_signal['entry'] == signal['entry']:
             return None
@@ -282,7 +283,6 @@ def load_signals():
     if os.path.exists(CONFIG["csv_file"]):
         try:
             df = pd.read_csv(CONFIG["csv_file"])
-            # Ensure required columns exist
             for col in ['time', 'candle_time']:
                 if col not in df.columns:
                     df[col] = pd.NaT
@@ -318,8 +318,8 @@ async def bot_loop():
                         f"*{signal['symbol']}* {signal['signal']} @ {signal['entry']}\n"
                         f"SL: {signal['sl']} | TP: {signal['tp']} | Confidence: {signal['confidence']} | R/R: {signal['rr']}"
                     )
-            if not new_signal_generated:
-                await bot.send_market_status()
+            # Always send market update every loop (10 min)
+            await bot.send_market_status()
             await asyncio.sleep(CONFIG['poll_interval_sec'])
         await bot.exchange.close()
         if bot.session:
