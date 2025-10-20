@@ -53,7 +53,7 @@ class IndicatorsConfig:
 class BotConfig:
     symbols: List[str] = field(default_factory=lambda: os.getenv(
         "SYMBOLS",
-        "BTC/USDT,ETH/USDT,SOL/USDT,ADA/USDT,XRP/USDT,XPL/USDT,INJ/USDT"
+        "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,ADA/USDT:USDT,XRP/USDT:USDT,XPL/USDT:USDT,INJ/USDT:USDT"
     ).split(","))
     timeframe: str = os.getenv("TIMEFRAME", "1h")
     higher_timeframe: str = os.getenv("HIGHER_TIMEFRAME", "4h")
@@ -66,7 +66,6 @@ class BotConfig:
     ml_model_path: str = os.getenv("ML_MODEL_PATH", "xgb_model.pkl")
     telegram_bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
-    uptimerobot_url: Optional[str] = os.getenv("UPTIMEROBOT_URL")
     heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", 60))
 
 # -----------------------------
@@ -148,22 +147,11 @@ async def send_telegram_message(bot_token: str, chat_id: str, message: str):
             logger.error(f"Telegram send error: {e}")
 
 # -----------------------------
-# Heartbeat
+# Silent Heartbeat
 # -----------------------------
-async def send_heartbeat(url: str):
-    if not url:
-        return
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    logger.warning(f"Heartbeat failed with status: {resp.status}")
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
-
-async def heartbeat_loop(url: str, interval: int):
+async def heartbeat_loop(interval: int):
     while True:
-        await send_heartbeat(url)
+        # Silent loop; keeps the bot alive
         await asyncio.sleep(interval)
 
 # -----------------------------
@@ -349,19 +337,15 @@ class SignalBot:
 
     async def run(self):
         await self.store.init_db()
-
-        # Start heartbeat task if URL is provided
-        heartbeat_task = None
-        if self.cfg.uptimerobot_url:
-            heartbeat_task = asyncio.create_task(heartbeat_loop(self.cfg.uptimerobot_url, self.cfg.heartbeat_interval))
+        # Start silent heartbeat
+        heartbeat_task = asyncio.create_task(heartbeat_loop(self.cfg.heartbeat_interval))
 
         while self.running_event.is_set():
             tasks = [self.generate_signal(sym) for sym in self.cfg.symbols]
             await asyncio.gather(*tasks)
             await asyncio.sleep(self.cfg.poll_interval)
 
-        if heartbeat_task:
-            heartbeat_task.cancel()
+        heartbeat_task.cancel()
         await self.store.close()
         await self.exchange.close()
 
