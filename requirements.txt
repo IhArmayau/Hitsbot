@@ -1,11 +1,20 @@
+# Core dependencies (install first)
 numpy==1.26.4
 pandas==2.1.1
+
+# Data indicators
 ta==0.10.2
+
+# Async & Exchange
 ccxt==3.0.75
 aiohttp==3.9.5
 aiosqlite==0.18.0
 aiofiles==23.1.0
+
+# AI Model
 xgboost==1.7.6
 scikit-learn==1.3.2
+
+# Env & Monitoring
 python-dotenv==1.0.0
 prometheus-client==0.20.0
