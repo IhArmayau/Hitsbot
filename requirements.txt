@@ -1,1 +1,20 @@
-requirements.txt
+# core
+ccxt==4.3.86
+aiohttp
+aiosqlite
+pandas
+numpy
+ta
+python-dotenv
+rich
+colorlog
+
+# ML
+xgboost
+scikit-learn
+
+# optional/faster json
+ujson
+
+# deployment
+gunicorn
