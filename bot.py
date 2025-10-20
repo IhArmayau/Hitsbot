@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-Render-ready SignalBot main file.
-- Loads pre-trained XGBoost model at startup (xgb_model.pkl by default).
-- Uses ccxt to fetch candles, ta to compute indicators.
-- Sends signals to Telegram if configured.
-- Heartbeat loop for uptime ping (optional).
-"""
-
 from __future__ import annotations
 import asyncio
 import ccxt.async_support as ccxt
@@ -24,7 +16,8 @@ import aiohttp
 import pickle
 from dotenv import load_dotenv
 import signal
-import sys
+from fastapi import FastAPI
+import uvicorn
 
 # -----------------------------
 # Load Environment Variables
@@ -39,7 +32,7 @@ logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(messa
 logger = logging.getLogger("SignalBotAI")
 
 # -----------------------------
-# Config
+# Bot Config
 # -----------------------------
 @dataclass
 class IndicatorsConfig:
@@ -66,17 +59,15 @@ class BotConfig:
     limit: int = int(os.getenv("LIMIT", 500))
     poll_interval: int = int(os.getenv("POLL_INTERVAL", 300))
     sqlite_db: str = os.getenv("SQLITE_DB", "signals.db")
-    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", 70.0))  # percent
+    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", 70.0))
     max_concurrent_tasks: int = int(os.getenv("MAX_CONCURRENT_TASKS", 5))
     indicators: IndicatorsConfig = field(default_factory=IndicatorsConfig)
     ml_model_path: str = os.getenv("ML_MODEL_PATH", "xgb_model.pkl")
     telegram_bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
-    heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", 60))
-    uptime_ping_url: Optional[str] = os.getenv("UPTIME_PING_URL")
 
 # -----------------------------
-# DB (aiosqlite)
+# DB
 # -----------------------------
 class SignalStore:
     def __init__(self, db_path: str):
@@ -126,11 +117,7 @@ class SignalStore:
 # Helpers
 # -----------------------------
 def rr_bar(rr_value: float, max_rr: float = 5.0, length: int = 10) -> str:
-    blocks = 0
-    try:
-        blocks = min(int((rr_value / max_rr) * length), length)
-    except Exception:
-        blocks = 0
+    blocks = min(int((rr_value / max_rr) * length), length)
     return "🟩" * max(0, blocks) + "⬜" * (length - max(0, blocks))
 
 def format_signal_message(signals: List[Dict]) -> str:
@@ -157,17 +144,6 @@ async def send_telegram_message(bot_token: str, chat_id: str, message: str):
         except Exception as e:
             logger.error("Telegram error: %s", e)
 
-async def heartbeat_loop(interval: int, uptime_ping_url: Optional[str] = None):
-    async with aiohttp.ClientSession() as session:
-        while True:
-            if uptime_ping_url:
-                try:
-                    async with session.get(uptime_ping_url, timeout=10) as resp:
-                        logger.debug("Uptime ping status: %s", resp.status)
-                except Exception as e:
-                    logger.warning("Uptime ping failed: %s", e)
-            await asyncio.sleep(interval)
-
 def confirm_candle(df: pd.DataFrame, sig_type: str) -> bool:
     if len(df) < 3:
         return False
@@ -191,31 +167,16 @@ def add_indicators(df: pd.DataFrame, ind_cfg: IndicatorsConfig, df_htf: Optional
     df['ema_short'] = df['close'].ewm(span=ind_cfg.ema_short, adjust=False).mean()
     df['ema_medium'] = df['close'].ewm(span=ind_cfg.ema_medium, adjust=False).mean()
     df['ema_long'] = df['close'].ewm(span=ind_cfg.ema_long, adjust=False).mean()
-    try:
-        df['rsi'] = ta.momentum.RSIIndicator(df['close'], ind_cfg.rsi_period).rsi()
-    except Exception:
-        df['rsi'] = np.nan
-    try:
-        df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], ind_cfg.atr_period).average_true_range()
-    except Exception:
-        df['atr'] = np.nan
-    try:
-        df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], 14).adx()
-    except Exception:
-        df['adx'] = np.nan
-    try:
-        bb = ta.volatility.BollingerBands(df['close'], ind_cfg.bb_period, ind_cfg.bb_std)
-        df['bb_middle'] = bb.bollinger_mavg()
-        df['bb_trend'] = np.where(df['close'] > df['bb_middle'], 1, -1)
-    except Exception:
-        df['bb_trend'] = 0
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], ind_cfg.rsi_period).rsi()
+    df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], ind_cfg.atr_period).average_true_range()
+    df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], 14).adx()
+    bb = ta.volatility.BollingerBands(df['close'], ind_cfg.bb_period, ind_cfg.bb_std)
+    df['bb_middle'] = bb.bollinger_mavg()
+    df['bb_trend'] = np.where(df['close'] > df['bb_middle'], 1, -1)
     df['vol_avg'] = df['volume'].rolling(20).mean()
     df['vol_ok'] = (df['volume'] > df['vol_avg']).astype(int)
     if df_htf is not None and not df_htf.empty:
-        try:
-            df['htf_trend'] = np.where(df_htf['close'].iloc[-1] > df_htf['open'].iloc[-1], 1, -1)
-        except Exception:
-            df['htf_trend'] = 0
+        df['htf_trend'] = np.where(df_htf['close'].iloc[-1] > df_htf['open'].iloc[-1], 1, -1)
     else:
         df['htf_trend'] = 0
     df = df.dropna().reset_index(drop=True)
@@ -227,7 +188,6 @@ def add_indicators(df: pd.DataFrame, ind_cfg: IndicatorsConfig, df_htf: Optional
 class SignalBot:
     def __init__(self, cfg: BotConfig):
         self.cfg = cfg
-        self.cfg.symbols = [s.strip() for s in self.cfg.symbols]
         self.exchange = ccxt.kucoinfutures({"enableRateLimit": True})
         self.store = SignalStore(cfg.sqlite_db)
         self.semaphore = asyncio.Semaphore(cfg.max_concurrent_tasks)
@@ -239,35 +199,17 @@ class SignalBot:
         if not path or not os.path.exists(path):
             logger.warning("ML model not found at %s. Running without AI predictions.", path)
             return None
-        try:
-            with open(path, "rb") as f:
-                model = pickle.load(f)
-            logger.info("Loaded ML model from %s", path)
-            return model
-        except Exception as e:
-            logger.error("Failed to load model: %s", e)
-            return None
+        with open(path, "rb") as f:
+            model = pickle.load(f)
+        logger.info("Loaded ML model from %s", path)
+        return model
 
     def model_predict_prob(self, row: pd.Series) -> float:
         if self.model is None:
             return 0.5
-        try:
-            vals = []
-            for f in FEATURE_LIST:
-                v = row.get(f, 0)
-                if isinstance(v, (bool, np.bool_)):
-                    v = int(v)
-                try:
-                    v = float(v)
-                except Exception:
-                    v = 0.0
-                vals.append(v)
-            arr = np.array(vals).reshape(1, -1)
-            prob = float(self.model.predict_proba(arr)[0][1])
-            return prob
-        except Exception as e:
-            logger.error("Model predict failed: %s", e)
-            return 0.5
+        vals = [float(row.get(f, 0)) for f in FEATURE_LIST]
+        arr = np.array(vals).reshape(1, -1)
+        return float(self.model.predict_proba(arr)[0][1])
 
     async def fetch_candles(self, symbol: str, tf: str) -> pd.DataFrame:
         for attempt in range(3):
@@ -291,7 +233,6 @@ class SignalBot:
             if df.empty:
                 return
             last = df.iloc[-1]
-
             signal_type = None
             if last['close'] > last['ema_short'] > last['ema_medium'] and confirm_candle(df, "BUY"):
                 signal_type = "BUY"
@@ -300,17 +241,14 @@ class SignalBot:
             if not signal_type:
                 return
 
-            # AI probability (0-1)
             prob = self.model_predict_prob(last)
             confidence = prob * 100.0
             if confidence < self.cfg.confidence_threshold:
-                logger.debug("AI confidence %.2f < threshold for %s", confidence, symbol)
                 return
 
             entry = float(last['close'])
-            atr = float(last.get('atr') or 0.0)
+            atr = float(last['atr'] or 0)
             if atr <= 0:
-                logger.warning("Invalid ATR for %s: %s", symbol, atr)
                 return
 
             if signal_type == "BUY":
@@ -331,13 +269,10 @@ class SignalBot:
                 "sl": sl,
                 "tp": tp,
                 "confidence": confidence,
-                "rr": rr,
-                "htf_trend": int(last.get('htf_trend', 0)),
-                "bb_trend": int(last.get('bb_trend', 0)),
+                "rr": rr
             }
 
             await self.store.insert_signal(sig)
-            logger.info("Generated signal: %s", sig)
 
             if self.cfg.telegram_bot_token and self.cfg.telegram_chat_id:
                 msg = format_signal_message([sig])
@@ -345,53 +280,35 @@ class SignalBot:
 
     async def run(self):
         await self.store.init_db()
-        hb = asyncio.create_task(heartbeat_loop(self.cfg.heartbeat_interval, self.cfg.uptime_ping_url))
-        try:
-            while self.running_event.is_set():
-                tasks = [self.generate_signal(s) for s in self.cfg.symbols]
-                await asyncio.gather(*tasks, return_exceptions=True)
-                await asyncio.sleep(self.cfg.poll_interval)
-        finally:
-            hb.cancel()
-            try:
-                await hb
-            except Exception:
-                pass
-            await self.store.close()
-            try:
-                await self.exchange.close()
-            except Exception:
-                pass
+        while self.running_event.is_set():
+            tasks = [self.generate_signal(s) for s in self.cfg.symbols]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(self.cfg.poll_interval)
+        await self.store.close()
+        await self.exchange.close()
 
     def stop(self):
         self.running_event.clear()
 
 # -----------------------------
-# Entrypoint
+# FastAPI + Entrypoint
 # -----------------------------
-def main():
-    cfg = BotConfig()
-    bot = SignalBot(cfg)
-    loop = asyncio.get_event_loop()
+app = FastAPI()
+cfg = BotConfig()
+bot = SignalBot(cfg)
 
-    def _shutdown(*args):
-        logger.info("Shutting down...")
-        bot.stop()
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(bot.run())
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _shutdown)
-        except NotImplementedError:
-            signal.signal(sig, lambda s,f: _shutdown())
+@app.get("/")
+async def root():
+    return {"status": "alive"}
 
-    try:
-        loop.run_until_complete(bot.run())
-    finally:
-        try:
-            loop.run_until_complete(bot.exchange.close())
-        except Exception:
-            pass
-        loop.close()
+@app.get("/stop")
+async def stop_bot():
+    bot.stop()
+    return {"status": "stopping"}
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
