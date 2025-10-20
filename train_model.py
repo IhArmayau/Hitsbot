@@ -1,43 +1,29 @@
 #!/usr/bin/env python3
-"""
-Render-ready model training script for SignalBotAI.
-- Fetches historical OHLCV data for configured symbols
-- Computes the same indicators as the bot
-- Generates BUY/SELL labels
-- Trains XGBoost classifier
-- Saves model to /mnt/data/xgb_model.pkl
-"""
-
-from __future__ import annotations
 import ccxt.async_support as ccxt
 import pandas as pd
-import numpy as np
 import ta
+import numpy as np
 import asyncio
-import logging
 import os
-import pickle
-from xgboost import XGBClassifier
 from dotenv import load_dotenv
 from datetime import datetime
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, roc_auc_score
+from xgboost import XGBClassifier
+import pickle
 
 # -----------------------------
-# Load env + logging
+# Load Environment
 # -----------------------------
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("Trainer")
-
-SYMBOLS = [s.strip() for s in os.getenv(
-    "SYMBOLS",
-    "BTCUSDT:USDT,ETHUSDT:USDT,SOLUSDT:USDT,ADAUSDT:USDT,XRPUSDT:USDT,INJUSDT:USDT"
-).split(",")]
-
+SYMBOLS = os.getenv("SYMBOLS", "BTC/USDT,ETH/USDT").split(",")
 TIMEFRAME = os.getenv("TIMEFRAME", "1h")
-LIMIT = int(os.getenv("LIMIT", 1000))
-MODEL_OUTPUT = "/mnt/data/xgb_model.pkl"
+HTF_TIMEFRAME = os.getenv("HIGHER_TIMEFRAME", "4h")
+LIMIT = int(os.getenv("LIMIT", 500))
+TOTAL_CANDLES = int(os.getenv("TOTAL_CANDLES", 2000))
+MODEL_PATH = os.getenv("ML_MODEL_PATH", "xgb_model.pkl")
 
-# Indicator settings
+# Indicator params
 EMA_SHORT = int(os.getenv("EMA_SHORT", 9))
 EMA_MEDIUM = int(os.getenv("EMA_MEDIUM", 21))
 EMA_LONG = int(os.getenv("EMA_LONG", 50))
@@ -46,12 +32,14 @@ ATR_PERIOD = int(os.getenv("ATR_PERIOD", 14))
 BB_PERIOD = int(os.getenv("BB_PERIOD", 20))
 BB_STD = float(os.getenv("BB_STD", 2.0))
 
-FEATURES = ['ema_short','ema_medium','ema_long','rsi','atr','adx','bb_trend','vol_ok']
+FEATURE_LIST = ['ema_short','ema_medium','ema_long','rsi','atr','adx','bb_trend','vol_ok','htf_trend']
 
 # -----------------------------
-# Helper functions
+# Helpers
 # -----------------------------
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def add_indicators(df, df_htf=None):
+    for c in ['open','high','low','close','volume']:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
     df['ema_short'] = df['close'].ewm(span=EMA_SHORT, adjust=False).mean()
     df['ema_medium'] = df['close'].ewm(span=EMA_MEDIUM, adjust=False).mean()
     df['ema_long'] = df['close'].ewm(span=EMA_LONG, adjust=False).mean()
@@ -63,67 +51,104 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['bb_trend'] = np.where(df['close'] > df['bb_middle'], 1, -1)
     df['vol_avg'] = df['volume'].rolling(20).mean()
     df['vol_ok'] = (df['volume'] > df['vol_avg']).astype(int)
-    df.dropna(inplace=True)
+    if df_htf is not None and not df_htf.empty:
+        df['htf_trend'] = np.where(df_htf['close'].iloc[-1] > df_htf['open'].iloc[-1], 1, -1)
+    else:
+        df['htf_trend'] = 0
+    df = df.dropna().reset_index(drop=True)
     return df
 
-def generate_labels(df: pd.DataFrame, future_window: int = 3) -> pd.DataFrame:
-    df['future_close'] = df['close'].shift(-future_window)
-    df['label'] = 0
-    df.loc[df['future_close'] > df['close'] * 1.002, 'label'] = 1
-    df.loc[df['future_close'] < df['close'] * 0.998, 'label'] = 0
-    df.dropna(inplace=True)
+def generate_signal(row):
+    if row['close'] > row['ema_short'] > row['ema_medium']:
+        return "BUY"
+    elif row['close'] < row['ema_short'] < row['ema_medium']:
+        return "SELL"
+    else:
+        return None
+
+def timeframe_to_minutes(tf: str):
+    if tf.endswith("m"):
+        return int(tf[:-1])
+    if tf.endswith("h"):
+        return int(tf[:-1]) * 60
+    if tf.endswith("d"):
+        return int(tf[:-1]) * 60 * 24
+    raise ValueError(f"Unsupported timeframe: {tf}")
+
+async def fetch_historical(exchange, symbol, timeframe, total_candles):
+    all_candles = []
+    limit = 500
+    tf_minutes = timeframe_to_minutes(timeframe)
+    now = int(datetime.utcnow().timestamp() * 1000)
+    fetched = 0
+
+    while fetched < total_candles:
+        end_time = now - fetched * tf_minutes * 60 * 1000
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=min(limit, total_candles - fetched), params={"endTime": end_time})
+        if not ohlcv:
+            break
+        all_candles.extend(ohlcv)
+        fetched += len(ohlcv)
+        if len(ohlcv) < limit:
+            break
+
+    df = pd.DataFrame(all_candles, columns=["timestamp","open","high","low","close","volume"])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df = df.sort_values('timestamp').reset_index(drop=True)
     return df
-
-async def fetch_symbol_data(symbol: str, exchange: ccxt.Exchange) -> pd.DataFrame:
-    try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = compute_indicators(df)
-        df = generate_labels(df)
-        df['symbol'] = symbol
-        return df
-    except Exception as e:
-        logger.error("Error fetching %s: %s", symbol, e)
-        return pd.DataFrame()
-
-async def collect_all_data() -> pd.DataFrame:
-    exchange = ccxt.kucoinfutures({'enableRateLimit': True})
-    tasks = [fetch_symbol_data(s, exchange) for s in SYMBOLS]
-    results = await asyncio.gather(*tasks)
-    await exchange.close()
-    df_all = pd.concat(results, ignore_index=True)
-    logger.info("Collected %d rows total", len(df_all))
-    return df_all
-
-def train_model(df: pd.DataFrame):
-    X = df[FEATURES]
-    y = df['label']
-    model = XGBClassifier(
-        n_estimators=250,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric='logloss',
-        use_label_encoder=False
-    )
-    model.fit(X, y)
-    with open(MODEL_OUTPUT, "wb") as f:
-        pickle.dump(model, f)
-    logger.info("Model trained and saved to %s", MODEL_OUTPUT)
 
 # -----------------------------
-# Entrypoint
+# Main
 # -----------------------------
 async def main():
-    logger.info("Starting training pipeline...")
-    df = await collect_all_data()
-    if df.empty:
-        logger.error("No data collected. Exiting.")
-        return
-    train_model(df)
-    logger.info("✅ Model training completed successfully at %s", datetime.utcnow().isoformat())
+    exchange = ccxt.kucoinfutures({"enableRateLimit": True})
+    all_data = []
+
+    for symbol in SYMBOLS:
+        print(f"Fetching {TOTAL_CANDLES} candles for {symbol}...")
+        df = await fetch_historical(exchange, symbol, TIMEFRAME, TOTAL_CANDLES)
+        df_htf = await fetch_historical(exchange, symbol, HTF_TIMEFRAME, TOTAL_CANDLES // (timeframe_to_minutes(HTF_TIMEFRAME)//timeframe_to_minutes(TIMEFRAME)))
+        df = add_indicators(df, df_htf)
+        df['signal'] = df.apply(generate_signal, axis=1)
+        df = df.dropna(subset=['signal'])
+        df['symbol'] = symbol
+        all_data.append(df[FEATURE_LIST + ['signal', 'symbol']])
+
+    final_df = pd.concat(all_data, ignore_index=True)
+    print(f"Total rows collected: {len(final_df)}")
+
+    # -----------------------------
+    # Train XGBoost
+    # -----------------------------
+    X = final_df[FEATURE_LIST].fillna(0)
+    y = final_df['signal'].apply(lambda x: 1 if x=="BUY" else 0)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    model = XGBClassifier(
+        n_estimators=200,
+        max_depth=5,
+        learning_rate=0.1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        use_label_encoder=False,
+        eval_metric="logloss",
+        random_state=42
+    )
+
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:,1]
+
+    acc = accuracy_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_proba)
+    print(f"Accuracy: {acc:.4f}, AUC: {auc:.4f}")
+
+    # Save model
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump(model, f)
+    print(f"Model saved to {MODEL_PATH}")
+    await exchange.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

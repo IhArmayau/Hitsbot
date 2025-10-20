@@ -1,15 +1,8 @@
 ccxt==4.3.86
 aiohttp
-aiosqlite
 pandas
 numpy
 ta
 python-dotenv
-rich
-colorlog
 xgboost
 scikit-learn
-ujson
-fastapi
-uvicorn
-gunicorn
