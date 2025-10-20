@@ -1,4 +1,3 @@
-# core
 ccxt==4.3.86
 aiohttp
 aiosqlite
@@ -8,13 +7,9 @@ ta
 python-dotenv
 rich
 colorlog
-
-# ML
 xgboost
 scikit-learn
-
-# optional/faster json
 ujson
-
-# deployment
+fastapi
+uvicorn
 gunicorn

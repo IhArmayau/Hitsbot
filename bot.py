@@ -205,10 +205,8 @@ class SignalBot:
         return model
 
     def model_predict_prob(self, row: pd.Series) -> float:
-        if self.model is None:
-            return 0.5
-        vals = [float(row.get(f, 0)) for f in FEATURE_LIST]
-        arr = np.array(vals).reshape(1, -1)
+        if self.model is None:                                         return 0.5
+        vals = [float(row.get(f, 0)) for f in FEATURE_LIST]        arr = np.array(vals).reshape(1, -1)
         return float(self.model.predict_proba(arr)[0][1])
 
     async def fetch_candles(self, symbol: str, tf: str) -> pd.DataFrame:
@@ -231,8 +229,7 @@ class SignalBot:
                 return
             df = add_indicators(df, self.cfg.indicators, df_htf)
             if df.empty:
-                return
-            last = df.iloc[-1]
+                return                                                 last = df.iloc[-1]
             signal_type = None
             if last['close'] > last['ema_short'] > last['ema_medium'] and confirm_candle(df, "BUY"):
                 signal_type = "BUY"
@@ -242,15 +239,11 @@ class SignalBot:
                 return
 
             prob = self.model_predict_prob(last)
-            confidence = prob * 100.0
-            if confidence < self.cfg.confidence_threshold:
-                return
-
+            confidence = prob * 100.0                                  if confidence < self.cfg.confidence_threshold:
+                return                                     
             entry = float(last['close'])
-            atr = float(last['atr'] or 0)
-            if atr <= 0:
-                return
-
+            atr = float(last['atr'] or 0)                              if atr <= 0:
+                return                                     
             if signal_type == "BUY":
                 sl = entry - atr * self.cfg.indicators.atr_sl_mult
                 tp = entry + atr * self.cfg.indicators.atr_tp_mult
@@ -258,26 +251,17 @@ class SignalBot:
                 sl = entry + atr * self.cfg.indicators.atr_sl_mult
                 tp = entry - atr * self.cfg.indicators.atr_tp_mult
 
-            denom = abs(entry - sl)
-            rr = abs((tp - entry) / denom) if denom != 0 else 0.0
+            denom = abs(entry - sl)                                    rr = abs((tp - entry) / denom) if denom != 0 else 0.0
 
-            sig = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "symbol": symbol,
-                "signal": signal_type,
+            sig = {                                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,                                          "signal": signal_type,
                 "entry": entry,
-                "sl": sl,
-                "tp": tp,
-                "confidence": confidence,
-                "rr": rr
-            }
-
-            await self.store.insert_signal(sig)
-
+                "sl": sl,                                                  "tp": tp,
+                "confidence": confidence,                                  "rr": rr
+            }                                              
+            await self.store.insert_signal(sig)            
             if self.cfg.telegram_bot_token and self.cfg.telegram_chat_id:
-                msg = format_signal_message([sig])
-                await send_telegram_message(self.cfg.telegram_bot_token, self.cfg.telegram_chat_id, msg)
-
+                msg = format_signal_message([sig])                         await send_telegram_message(self.cfg.telegram_bot_token, self.cfg.telegram_chat_id, msg)              
     async def run(self):
         await self.store.init_db()
         while self.running_event.is_set():
@@ -303,6 +287,11 @@ async def startup_event():
 
 @app.get("/")
 async def root():
+    return {"status": "alive"}
+
+@app.get("/heartbeat")
+async def heartbeat():
+    logger.info("💓 Heartbeat ping received")
     return {"status": "alive"}
 
 @app.get("/stop")
