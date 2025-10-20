@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 import ccxt.async_support as ccxt
 import pandas as pd
 import ta

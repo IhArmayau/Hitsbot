@@ -15,21 +15,23 @@ import numpy as np
 import aiohttp
 import pickle
 from dotenv import load_dotenv
+from fastapi import FastAPI
+import uvicorn
 
 # -----------------------------
-# Load Environment Variables
+# Load environment variables
 # -----------------------------
 load_dotenv()
 
 # -----------------------------
-# Logging Configuration
+# Logging
 # -----------------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("SignalBotAI")
 
 # -----------------------------
-# Bot Config
+# Configs
 # -----------------------------
 @dataclass
 class IndicatorsConfig:
@@ -46,9 +48,9 @@ class IndicatorsConfig:
 @dataclass
 class BotConfig:
     symbols: List[str] = field(default_factory=lambda: [
-        s.strip().replace(":USDT", "") for s in os.getenv(
+        s.strip() for s in os.getenv(
             "SYMBOLS",
-            "BTC/USDT,ETH/USDT,SOL/USDT,ADA/USDT,XRP/USDT,XPL/USDT,INJ/USDT"
+            "BTCUSDT:USDT,ETHUSDT:USDT,SOLUSDT:USDT,ADAUSDT:USDT,XRPUSDT:USDT,XPLUSDT:USDT,INJUSDT:USDT"
         ).split(",")
     ])
     timeframe: str = os.getenv("TIMEFRAME", "1h")
@@ -64,7 +66,7 @@ class BotConfig:
     telegram_chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
 
 # -----------------------------
-# DB
+# Database
 # -----------------------------
 class SignalStore:
     def __init__(self, db_path: str):
@@ -88,6 +90,7 @@ class SignalStore:
             )
         """)
         await self.conn.commit()
+        logger.info("Database initialized at %s", self.db_path)
 
     async def insert_signal(self, sig: Dict):
         if not self.conn:
@@ -95,7 +98,7 @@ class SignalStore:
             return
         try:
             await self.conn.execute("""
-                INSERT INTO signals (timestamp,symbol,signal,entry,sl,tp,confidence,rr,outcome)
+                INSERT INTO signals (timestamp, symbol, signal, entry, sl, tp, confidence, rr, outcome)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sig['timestamp'], sig['symbol'], sig['signal'], float(sig['entry']),
@@ -103,6 +106,7 @@ class SignalStore:
                 float(sig['rr']), sig.get('outcome')
             ))
             await self.conn.commit()
+            logger.info("Inserted signal into DB: %s", sig)
         except Exception as e:
             logger.error("DB insert failed: %s", e)
 
@@ -110,6 +114,7 @@ class SignalStore:
         if self.conn:
             await self.conn.close()
             self.conn = None
+            logger.info("Database connection closed")
 
 # -----------------------------
 # Helpers
@@ -153,7 +158,7 @@ def confirm_candle(df: pd.DataFrame, sig_type: str) -> bool:
     return False
 
 # -----------------------------
-# Core: Feature engineering + Model interface
+# Feature Engineering
 # -----------------------------
 FEATURE_LIST = ['ema_short','ema_medium','ema_long','rsi','atr','adx','bb_trend','vol_ok','htf_trend']
 
@@ -167,7 +172,7 @@ def add_indicators(df: pd.DataFrame, ind_cfg: IndicatorsConfig, df_htf: Optional
     df['ema_long'] = df['close'].ewm(span=ind_cfg.ema_long, adjust=False).mean()
     df['rsi'] = ta.momentum.RSIIndicator(df['close'], ind_cfg.rsi_period).rsi()
     df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], ind_cfg.atr_period).average_true_range()
-    df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], 14).adx()
+    df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], ind_cfg.atr_period).adx()
     bb = ta.volatility.BollingerBands(df['close'], ind_cfg.bb_period, ind_cfg.bb_std)
     df['bb_middle'] = bb.bollinger_mavg()
     df['bb_trend'] = np.where(df['close'] > df['bb_middle'], 1, -1)
@@ -177,8 +182,7 @@ def add_indicators(df: pd.DataFrame, ind_cfg: IndicatorsConfig, df_htf: Optional
         df['htf_trend'] = np.where(df_htf['close'].iloc[-1] > df_htf['open'].iloc[-1], 1, -1)
     else:
         df['htf_trend'] = 0
-    df = df.dropna().reset_index(drop=True)
-    return df
+    return df.dropna().reset_index(drop=True)
 
 # -----------------------------
 # SignalBot
@@ -204,10 +208,31 @@ class SignalBot:
 
     def model_predict_prob(self, row: pd.Series) -> float:
         if self.model is None:
+            logger.info("ML model not loaded. Returning default probability 0.5")
             return 0.5
-        vals = [float(row.get(f, 0)) for f in FEATURE_LIST]
-        arr = np.array(vals).reshape(1, -1)
-        return float(self.model.predict_proba(arr)[0][1])
+
+        try:
+            vals = []
+            for f in FEATURE_LIST:
+                val = row.get(f, 0)
+                if pd.isna(val):
+                    val = 0.0
+                vals.append(float(val))
+
+            arr = np.array(vals).reshape(1, -1)
+            prob = float(self.model.predict_proba(arr)[0][1])
+
+            logger.info(
+                "ML prediction for %s: %.2f%% (features: %s)",
+                row.get("symbol", "unknown"),
+                prob * 100,
+                {f: row.get(f, 0) for f in FEATURE_LIST}
+            )
+            return prob
+
+        except Exception as e:
+            logger.error("Error predicting ML probability: %s", e)
+            return 0.5
 
     async def fetch_candles(self, symbol: str, tf: str) -> pd.DataFrame:
         for attempt in range(3):
@@ -223,31 +248,55 @@ class SignalBot:
 
     async def generate_signal(self, symbol: str):
         async with self.semaphore:
+            logger.info("Fetching candles for %s", symbol)
             df = await self.fetch_candles(symbol, self.cfg.timeframe)
             df_htf = await self.fetch_candles(symbol, self.cfg.higher_timeframe)
-            if df.empty or df_htf.empty:
+
+            if df.empty:
+                logger.warning("No candles returned for %s %s", symbol, self.cfg.timeframe)
                 return
+            if df_htf.empty:
+                logger.warning("No HTF candles returned for %s %s", symbol, self.cfg.higher_timeframe)
+                return
+
             df = add_indicators(df, self.cfg.indicators, df_htf)
             if df.empty:
+                logger.warning("Indicators resulted in empty DataFrame for %s", symbol)
                 return
 
             last = df.iloc[-1]
             signal_type = None
+
+            logger.info(
+                "Checking signal for %s: close=%.8f, ema_short=%.8f, ema_medium=%.8f",
+                symbol, last['close'], last['ema_short'], last['ema_medium']
+            )
+
             if last['close'] > last['ema_short'] > last['ema_medium'] and confirm_candle(df, "BUY"):
                 signal_type = "BUY"
             elif last['close'] < last['ema_short'] < last['ema_medium'] and confirm_candle(df, "SELL"):
                 signal_type = "SELL"
+
             if not signal_type:
+                logger.info("No signal generated for %s", symbol)
                 return
 
+            # ML probability
             prob = self.model_predict_prob(last)
             confidence = prob * 100.0
+            logger.info("Signal type: %s, confidence: %.2f%%", signal_type, confidence)
+
             if confidence < self.cfg.confidence_threshold:
+                logger.info(
+                    "Confidence %.2f%% below threshold %.2f%% for %s. Skipping signal.",
+                    confidence, self.cfg.confidence_threshold, symbol
+                )
                 return
 
             entry = float(last['close'])
             atr = float(last['atr'] or 0)
             if atr <= 0:
+                logger.warning("ATR <= 0 for %s. Skipping signal.", symbol)
                 return
 
             if signal_type == "BUY":
@@ -257,8 +306,7 @@ class SignalBot:
                 sl = entry + atr * self.cfg.indicators.atr_sl_mult
                 tp = entry - atr * self.cfg.indicators.atr_tp_mult
 
-            denom = abs(entry - sl)
-            rr = abs((tp - entry) / denom) if denom != 0 else 0.0
+            rr = abs((tp - entry) / abs(entry - sl)) if entry - sl != 0 else 0.0
 
             sig = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -271,6 +319,7 @@ class SignalBot:
                 "rr": rr
             }
 
+            logger.info("Generated signal for %s: %s", symbol, sig)
             await self.store.insert_signal(sig)
 
             if self.cfg.telegram_bot_token and self.cfg.telegram_chat_id:
@@ -278,28 +327,71 @@ class SignalBot:
                 await send_telegram_message(self.cfg.telegram_bot_token, self.cfg.telegram_chat_id, msg)
 
     async def run(self):
+        logger.info("Initializing database...")
         await self.store.init_db()
-        while self.running_event.is_set():
-            tasks = [self.generate_signal(s) for s in self.cfg.symbols]
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.sleep(self.cfg.poll_interval)
-        await self.store.close()
-        await self.exchange.close()
+        logger.info("Database initialized. Starting main loop...")
+
+        try:
+            while self.running_event.is_set():
+                logger.info("Starting new poll cycle for symbols: %s", self.cfg.symbols)
+                tasks = [self.generate_signal(s) for s in self.cfg.symbols]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for idx, res in enumerate(results):
+                    if isinstance(res, Exception):
+                        logger.error("Error in task for symbol %s: %s", self.cfg.symbols[idx], res)
+
+                logger.info("Poll cycle complete. Sleeping for %d seconds.", self.cfg.poll_interval)
+                await asyncio.sleep(self.cfg.poll_interval)
+
+        except Exception as e:
+            logger.error("Unexpected error in run loop: %s", e)
+        finally:
+            logger.info("Shutting down bot...")
+            await self.store.close()
+            await self.exchange.close()
+            logger.info("Bot stopped cleanly.")
 
     def stop(self):
         self.running_event.clear()
+        logger.info("Stop signal received for bot.")
 
 # -----------------------------
-# Entrypoint
+# FastAPI app
 # -----------------------------
-async def main():
-    cfg = BotConfig()
-    bot = SignalBot(cfg)
+app = FastAPI()
+cfg = BotConfig()
+bot = SignalBot(cfg)
+
+@app.on_event("startup")
+async def startup_event():
     try:
-        await bot.run()
-    except KeyboardInterrupt:
-        logger.info("Stopping SignalBot...")
-        bot.stop()
+        logger.info("Starting SignalBotAI...")
+        await bot.store.init_db()
+        logger.info("Database initialized successfully.")
+        asyncio.create_task(bot.run())
+        logger.info("SignalBot main loop started.")
+    except Exception as e:
+        logger.error("Error during startup: %s", e)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Shutting down SignalBotAI...")
+    bot.stop()
+    await bot.store.close()
+    await bot.exchange.close()
+    logger.info("Shutdown complete.")
+
+@app.get("/")
+async def root():
+    return {"status": "alive"}
+
+@app.get("/heartbeat")
+async def heartbeat():
+    logger.info("💓 Heartbeat ping received")
+    return {"status": "alive"}
+
+@app.get("/stop")
+async def stop_bot():
+    bot.stop()
+    return {"status": "stopping"}
