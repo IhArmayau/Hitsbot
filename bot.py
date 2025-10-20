@@ -1,675 +1,397 @@
-
+#!/usr/bin/env python3
 from __future__ import annotations
 import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
 import ta
+import aiosqlite
 import logging
 import os
-import sqlite3
-import json
-import tempfile
-import time
-import math
-import re
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any, Optional, Tuple
+import random
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
 from datetime import datetime, timezone
-from dotenv import load_dotenv
-from flask import Flask, jsonify, Response
+import numpy as np
 import aiohttp
-import aiofiles
+import pickle
+from dotenv import load_dotenv
 import signal
-from concurrent.futures import ThreadPoolExecutor
-
-# Optional prometheus
-try:
-    from prometheus_client import Summary, Gauge, Counter, generate_latest, CollectorRegistry
-    PROM_AVAILABLE = True
-except Exception:
-    PROM_AVAILABLE = False
+import sys
 
 # -----------------------------
-# LOAD ENV
+# Load Environment Variables
 # -----------------------------
 load_dotenv()
 
 # -----------------------------
-# LOGGING (structured)
+# Logging Configuration
 # -----------------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("professional_signal_bot")
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("SignalBotAI")
 
 # -----------------------------
-# CONFIG DATACLASS
+# Configuration Classes
 # -----------------------------
 @dataclass
 class IndicatorsConfig:
-    ema_short: int = 9
-    ema_long: int = 21
-    ema_trend: int = 50
-    rsi_period: int = 14
-    rsi_overbought: int = 70
-    rsi_oversold: int = 30
-    atr_period: int = 14
-    atr_sl_mult: float = 1.5
-    atr_tp_mult: float = 3.0
-
-@dataclass
-class TelegramConfig:
-    bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
-    rate_limit: float = float(os.getenv("TELEGRAM_RATE_LIMIT", "1.0"))
+    ema_short: int = int(os.getenv("EMA_SHORT", 9))
+    ema_medium: int = int(os.getenv("EMA_MEDIUM", 21))
+    ema_long: int = int(os.getenv("EMA_LONG", 50))
+    rsi_period: int = int(os.getenv("RSI_PERIOD", 14))
+    rsi_overbought: float = float(os.getenv("RSI_OVERBOUGHT", 70))
+    rsi_oversold: float = float(os.getenv("RSI_OVERSOLD", 30))
+    atr_period: int = int(os.getenv("ATR_PERIOD", 14))
+    atr_tp_mult: float = float(os.getenv("ATR_TP_MULT", 3.0))
+    atr_sl_mult: float = float(os.getenv("ATR_SL_MULT", 1.5))
+    adx_period: int = int(os.getenv("ADX_PERIOD", 14))
+    adx_threshold: float = float(os.getenv("ADX_THRESHOLD", 20))
+    bb_period: int = int(os.getenv("BB_PERIOD", 20))
+    bb_std: float = float(os.getenv("BB_STD", 2.0))
 
 @dataclass
 class BotConfig:
-    symbols: List[str] = field(default_factory=lambda: [
-        "BTC/USDT:USDT",
-        "ETH/USDT:USDT",
-        "SOL/USDT:USDT",
-        "INJ/USDT:USDT",
-        "ADA/USDT:USDT",
-        "XPL/USDT:USDT",
-        "XRP/USDT:USDT"
-    ])
+    symbols: List[str] = field(default_factory=lambda: os.getenv(
+        "SYMBOLS",
+        "BTC/USDT,ETH/USDT,SOL/USDT,ADA/USDT,XRP/USDT,XPL/USDT,INJ/USDT"
+    ).split(","))
     timeframe: str = os.getenv("TIMEFRAME", "1h")
-    limit: int = int(os.getenv("LIMIT", "100"))
-    poll_interval_sec: int = int(os.getenv("POLL_INTERVAL_SEC", "600"))
-    csv_file: str = os.getenv("CSV_FILE", "signals.csv")
-    csv_save_batch: int = int(os.getenv("CSV_SAVE_BATCH", "5"))
-    max_csv_signals: int = int(os.getenv("MAX_CSV_SIGNALS", "1000"))
-    smc_lookback_structure: int = int(os.getenv("SMC_LOOKBACK", "5"))
-    smc_threshold: float = float(os.getenv("SMC_THRESHOLD", "0.8"))
-    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "50"))
-    indicators: IndicatorsConfig = field(default_factory=IndicatorsConfig)
-    telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    higher_timeframe: str = os.getenv("HIGHER_TIMEFRAME", "4h")
+    limit: int = int(os.getenv("LIMIT", 200))
+    poll_interval: int = int(os.getenv("POLL_INTERVAL", 300))
     sqlite_db: str = os.getenv("SQLITE_DB", "signals.db")
-    max_concurrent_fetches: int = int(os.getenv("MAX_CONCURRENT_FETCHES", "5"))
-    per_symbol_rate_limit_sec: float = float(os.getenv("PER_SYMBOL_RATE_LIMIT_SEC", "0.5"))
-
-
-# -----------------------------
-# METRICS (optional)
-# -----------------------------
-if PROM_AVAILABLE:
-    REG = CollectorRegistry()
-    METRIC_FETCH_DURATION = Summary("fetch_ohlcv_seconds", "Time taken to fetch OHLCV", registry=REG)
-    METRIC_SIGNALS_GENERATED = Counter("signals_generated_total", "Total number of signals generated", registry=REG)
-    METRIC_TELEGRAM_SENT = Counter("telegram_sent_total", "Total telegram messages sent", registry=REG)
-    METRIC_FETCH_ERRORS = Counter("fetch_errors_total", "Total fetch errors", registry=REG)
-else:
-    REG = None
-    METRIC_FETCH_DURATION = METRIC_SIGNALS_GENERATED = METRIC_TELEGRAM_SENT = METRIC_FETCH_ERRORS = None
-
+    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", 70))
+    max_concurrent_tasks: int = int(os.getenv("MAX_CONCURRENT_TASKS", 5))
+    indicators: IndicatorsConfig = field(default_factory=IndicatorsConfig)
+    ml_model_path: str = os.getenv("ML_MODEL_PATH", "xgb_model.pkl")
+    telegram_bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
+    uptimerobot_url: Optional[str] = os.getenv("UPTIMEROBOT_URL")
+    heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", 60))
 
 # -----------------------------
-# UTILITIES
-# -----------------------------
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-def escape_markdown_v2(text: str) -> str:
-    # Telegram MarkdownV2 escaping
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(r'([{}])'.format(re.escape(escape_chars)), r'\\\1', text)
-
-def backoff_sleep(attempt: int):
-    # exponential backoff with jitter
-    base = min(60, (2 ** attempt))
-    jitter = base * 0.1
-    return base - jitter + (jitter * 2 * (os.urandom(1)[0] / 255.0))
-
-# -----------------------------
-# PERSISTENCE (SQLite via run_in_executor)
+# Database Management
 # -----------------------------
 class SignalStore:
-    """Simple SQLite-backed store for signals and last_signal tracking."""
-    def __init__(self, db_path: str, executor: ThreadPoolExecutor):
+    def __init__(self, db_path: str):
         self.db_path = db_path
-        self.executor = executor
-        self._initialized = False
+        self.conn: Optional[aiosqlite.Connection] = None
 
-    def _init_db_sync(self):
-        con = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
-        cur = con.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            time TIMESTAMP,
-            symbol TEXT,
-            signal TEXT,
-            entry REAL,
-            sl REAL,
-            tp REAL,
-            candle_time TIMESTAMP,
-            confidence REAL,
-            ema_trend REAL,
-            rsi REAL,
-            rr REAL
-        )
+    async def init_db(self):
+        self.conn = await aiosqlite.connect(self.db_path)
+        await self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                symbol TEXT,
+                signal TEXT,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                confidence REAL,
+                rr REAL,
+                outcome TEXT
+            )
         """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS last_signal (
-            symbol TEXT PRIMARY KEY,
-            payload TEXT,
-            updated TIMESTAMP
-        )
-        """)
-        con.commit()
-        con.close()
-        self._initialized = True
+        await self.conn.commit()
 
-    async def init(self):
-        if not self._initialized:
-            await asyncio.get_running_loop().run_in_executor(self.executor, self._init_db_sync)
-
-    async def upsert_last_signal(self, symbol: str, payload: dict):
-        def sync_upsert():
-            con = sqlite3.connect(self.db_path)
-            cur = con.cursor()
-            cur.execute("""
-                INSERT INTO last_signal (symbol, payload, updated) VALUES (?, ?, ?)
-                ON CONFLICT(symbol) DO UPDATE SET payload=excluded.payload, updated=excluded.updated
-            """, (symbol, json.dumps(payload, default=str), datetime.utcnow()))
-            con.commit()
-            con.close()
-        await asyncio.get_running_loop().run_in_executor(self.executor, sync_upsert)
-
-    async def get_all_last_signals(self) -> List[dict]:
-        def sync_get():
-            con = sqlite3.connect(self.db_path)
-            cur = con.cursor()
-            cur.execute("SELECT payload FROM last_signal")
-            rows = cur.fetchall()
-            con.close()
-            return [json.loads(r[0]) for r in rows if r[0]]
-        return await asyncio.get_running_loop().run_in_executor(self.executor, sync_get)
-
-    async def insert_signal(self, signal: dict):
-        def sync_insert():
-            con = sqlite3.connect(self.db_path)
-            cur = con.cursor()
-            cur.execute("""
-                INSERT INTO signals (time, symbol, signal, entry, sl, tp, candle_time, confidence, ema_trend, rsi, rr)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    async def insert_signal(self, sig: Dict):
+        if not self.conn:
+            logger.warning("Database connection not initialized.")
+            return
+        try:
+            await self.conn.execute("""
+                INSERT INTO signals (timestamp, symbol, signal, entry, sl, tp, confidence, rr, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                signal.get("time"),
-                signal.get("symbol"),
-                signal.get("signal"),
-                signal.get("entry"),
-                signal.get("sl"),
-                signal.get("tp"),
-                signal.get("candle_time"),
-                signal.get("confidence"),
-                signal.get("ema_trend"),
-                signal.get("rsi"),
-                signal.get("rr")
+                sig['timestamp'], sig['symbol'], sig['signal'], sig['entry'],
+                sig['sl'], sig['tp'], sig['confidence'], sig['rr'], sig.get('outcome')
             ))
-            con.commit()
-            con.close()
-        await asyncio.get_running_loop().run_in_executor(self.executor, sync_insert)
-
-# -----------------------------
-# PROFESSIONAL SIGNAL BOT
-# -----------------------------
-class ProfessionalSignalBot:
-    def __init__(self, cfg: BotConfig):
-        self.config = cfg
-        self.exchange = ccxt.kucoinfutures({"enableRateLimit": True})
-        self.ohlcv_cache: Dict[Tuple[str, str], Tuple[float, pd.DataFrame]] = {}
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.fetch_semaphore = asyncio.Semaphore(self.config.max_concurrent_fetches)
-        self.telegram_queue: asyncio.Queue[str] = asyncio.Queue()
-        self.running = True
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        self.store = SignalStore(self.config.sqlite_db, self.executor)
-        self.local_signals_df = pd.DataFrame(columns=[
-            'time', 'symbol', 'signal', 'entry', 'sl', 'tp', 'candle_time', 'confidence', 'ema_trend', 'rsi', 'rr'
-        ])
-        # per-symbol last-send timestamp to respect rate limits
-        self._symbol_last_sent: Dict[str, float] = {}
-        # tasks
-        self._tasks: List[asyncio.Task] = []
-        # warm-up flag
-        self._markets_loaded = False
-
-    async def start(self):
-        logger.info("Starting ProfessionalSignalBot")
-        await self.store.init()
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-        # warm load markets (best-effort)
-        try:
-            await self.exchange.load_markets()
-            self._markets_loaded = True
-            logger.debug("Loaded exchange markets")
+            await self.conn.commit()
         except Exception as e:
-            logger.warning(f"Failed to load markets: {e}")
-        # start background workers
-        self._tasks.append(asyncio.create_task(self._telegram_worker()))
-        self._tasks.append(asyncio.create_task(self._main_loop()))
+            logger.error(f"Failed to insert signal into DB: {e}")
 
-    async def stop(self):
-        logger.info("Stopping ProfessionalSignalBot")
-        self.running = False
-        # wait for tasks to finish cleanly
-        for t in self._tasks:
-            t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        # flush buffered signals to DB & CSV
-        await self._flush_signals()
-        # close session & exchange
-        if self.session:
-            await self.session.close()
+    async def close(self):
+        if self.conn:
+            await self.conn.close()
+
+# -----------------------------
+# Performance Metrics
+# -----------------------------
+class PerformanceMetrics:
+    def __init__(self):
+        self.metrics: Dict[str, Dict] = {}
+
+    def update(self, sig: Dict):
+        sym = sig['symbol']
+        if sym not in self.metrics:
+            self.metrics[sym] = {"total":0, "wins":0, "losses":0, "avg_rr":0.0, "avg_conf":0.0, "win_rate":0.0}
+        m = self.metrics[sym]
+        m['total'] += 1
+        if sig.get("outcome") == "WIN": m['wins'] += 1
+        elif sig.get("outcome") == "LOSS": m['losses'] += 1
+        m['avg_rr'] = ((m['avg_rr']*(m['total']-1)) + sig['rr']) / m['total']
+        m['avg_conf'] = ((m['avg_conf']*(m['total']-1)) + sig['confidence']) / m['total']
+        m['win_rate'] = (m['wins'] / m['total'] * 100) if m['total'] > 0 else 0
+
+# -----------------------------
+# Telegram Utilities
+# -----------------------------
+async def send_telegram_message(bot_token: str, chat_id: str, message: str):
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    async with aiohttp.ClientSession() as session:
         try:
-            await self.exchange.close()
-        except Exception:
-            pass
-        self.executor.shutdown(wait=True)
+            async with session.post(url, data={"chat_id": chat_id, "text": message, "parse_mode":"Markdown"}) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Telegram send failed with status: {resp.status}")
+        except Exception as e:
+            logger.error(f"Telegram send error: {e}")
 
-    # -----------------------------
-    # TELEGRAM WORKER
-    # -----------------------------
-    async def send_telegram(self, message: str):
-        # public queuing method
-        await self.telegram_queue.put(message)
+# -----------------------------
+# Heartbeat
+# -----------------------------
+async def send_heartbeat(url: str):
+    if not url:
+        return
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Heartbeat failed with status: {resp.status}")
+        except Exception as e:
+            logger.error(f"Heartbeat error: {e}")
 
-    async def _telegram_worker(self):
-        logger.info("Telegram worker started")
-        cfg = self.config.telegram
-        while self.running or not self.telegram_queue.empty():
+async def heartbeat_loop(url: str, interval: int):
+    while True:
+        await send_heartbeat(url)
+        await asyncio.sleep(interval)
+
+# -----------------------------
+# Candle Confirmation
+# -----------------------------
+def confirm_candle(df: pd.DataFrame, sig_type: str) -> bool:
+    if len(df) < 3: 
+        return False
+    prev2, prev1, curr = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    if sig_type == "BUY" and curr['close'] > prev1['close'] > prev2['close'] and curr['open'] < prev1['close']:
+        return True
+    if sig_type == "SELL" and curr['close'] < prev1['close'] < prev2['close'] and curr['open'] > prev1['close']:
+        return True
+    return False
+
+# -----------------------------
+# Visualization Helpers
+# -----------------------------
+def rr_bar(rr_value: float, max_rr: float = 5.0, length: int = 10) -> str:
+    blocks = min(int((rr_value / max_rr) * length), length)
+    empty_blocks = length - blocks
+    return "🟩" * blocks + "⬜" * empty_blocks
+
+def format_signal_message(signals: List[Dict]) -> str:
+    if not signals:
+        return "_No new signals at this time._"
+    msg_lines = ["*📊 SignalBotAI New Signals* 🤖\n"]
+    for sig in signals:
+        signal_type = sig["signal"]
+        symbol = sig["symbol"]
+        entry = sig["entry"]
+        sl = sig["sl"]
+        tp = sig["tp"]
+        rr = sig["rr"]
+        confidence = sig["confidence"]
+
+        if confidence >= 90:
+            signal_icon = "🟢" if signal_type == "BUY" else "🔴"
+        elif confidence >= 70:
+            signal_icon = "🟡"
+        else:
+            signal_icon = "⚪"
+
+        htf_arrow = "📈" if sig.get("htf_trend", 0) > 0 else "📉"
+        bb_emoji = "🔵" if sig.get("bb_trend", 0) > 0 else "🔴"
+        rr_visual = rr_bar(rr)
+
+        msg_lines.append(
+            f"{bb_emoji} {signal_icon} *{signal_type}* {htf_arrow}\n"
+            f"• *Symbol:* `{symbol}`\n"
+            f"• *Entry:* `{entry:.2f}`\n"
+            f"• *SL:* `{sl:.2f}` | *TP:* `{tp:.2f}`\n"
+            f"• *R:R:* `{rr:.2f}` {rr_visual}\n"
+            f"• *Confidence:* `{confidence:.2f}%`\n"
+            f"────────────────────────"
+        )
+    return "\n".join(msg_lines)
+
+# -----------------------------
+# SignalBot Class
+# -----------------------------
+class SignalBot:
+    def __init__(self, cfg: BotConfig):
+        self.cfg = cfg
+        self.exchange = ccxt.kucoinfutures({"enableRateLimit": True})
+        self.store = SignalStore(cfg.sqlite_db)
+        self.metrics = PerformanceMetrics()
+        self.running_event = asyncio.Event()
+        self.running_event.set()
+        self.semaphore = asyncio.Semaphore(cfg.max_concurrent_tasks)
+        self.ai_model = self.load_ai_model()
+
+    def load_ai_model(self):
+        if os.path.exists(self.cfg.ml_model_path):
             try:
-                message = await self.telegram_queue.get()
-            except asyncio.CancelledError:
-                break
-            if not cfg.bot_token or not cfg.chat_id:
-                logger.debug("Telegram not configured; skipping message")
-                self.telegram_queue.task_done()
-                continue
-
-            # respect global rate limit and per-symbol rate limit (approx)
-            # simple throttling: ensure X seconds since last telegram
-            sleep_time = 0
-            now = time.time()
-            if now - getattr(self, "last_telegram_time", 0) < cfg.rate_limit:
-                sleep_time = cfg.rate_limit - (now - getattr(self, "last_telegram_time", 0))
-
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
-
-            url = f"https://api.telegram.org/bot{cfg.bot_token}/sendMessage"
-            payload = {
-                "chat_id": cfg.chat_id,
-                "text": escape_markdown_v2(message),
-                "parse_mode": "MarkdownV2",
-                "disable_web_page_preview": True
-            }
-            success = False
-            for attempt in range(3):
-                try:
-                    if not self.session:
-                        self.session = aiohttp.ClientSession()
-                    async with self.session.post(url, json=payload, timeout=10) as resp:
-                        text = await resp.text()
-                        if resp.status == 200:
-                            success = True
-                            setattr(self, "last_telegram_time", time.time())
-                            if PROM_AVAILABLE:
-                                METRIC_TELEGRAM_SENT.inc()
-                            break
-                        else:
-                            logger.warning(f"Telegram send failed: status={resp.status} body={text}")
-                except Exception as e:
-                    logger.warning(f"Telegram send attempt {attempt+1} failed: {e}")
-                await asyncio.sleep(2 ** attempt)
-            if not success:
-                logger.error("Telegram send failed after retries")
-            self.telegram_queue.task_done()
-        logger.info("Telegram worker stopped")
-
-    # -----------------------------
-    # FETCH OHLCV (cached + backoff)
-    # -----------------------------
-    async def fetch_ohlcv(self, symbol: str) -> pd.DataFrame:
-        key = (symbol, self.config.timeframe)
-        now_ts = time.time()
-        cache = self.ohlcv_cache.get(key)
-        # cache TTL: 300 seconds
-        if cache and (now_ts - cache[0]) < 300:
-            return cache[1]
-
-        for attempt in range(4):
-            try:
-                async with self.fetch_semaphore:
-                    t0 = time.time()
-                    raw = await self.exchange.fetch_ohlcv(symbol, timeframe=self.config.timeframe, limit=self.config.limit)
-                    duration = time.time() - t0
-                    if PROM_AVAILABLE:
-                        METRIC_FETCH_DURATION.observe(duration)
-                    df = pd.DataFrame(raw, columns=["time", "open", "high", "low", "close", "volume"])
-                    df["time"] = pd.to_datetime(df["time"], unit='ms', utc=True)
-                    df.set_index("time", inplace=True)
-                    df = self._add_indicators(df)
-                    self.ohlcv_cache[key] = (time.time(), df)
-                    return df
+                with open(self.cfg.ml_model_path, "rb") as f:
+                    model = pickle.load(f)
+                    logger.info("AI model loaded successfully.")
+                    return model
             except Exception as e:
-                logger.warning(f"fetch_ohlcv({symbol}) attempt {attempt+1} failed: {e}")
-                if PROM_AVAILABLE:
-                    METRIC_FETCH_ERRORS.inc()
-                await asyncio.sleep(backoff_sleep(attempt))
-        logger.error(f"Failed to fetch OHLCV for {symbol} after retries")
+                logger.error(f"Failed to load AI model: {e}")
+        logger.warning("No AI model found. Running without AI predictions.")
+        return None
+
+    async def fetch_candles(self, symbol: str, tf: str) -> pd.DataFrame:
+        for attempt in range(3):
+            try:
+                ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=tf, limit=self.cfg.limit)
+                df = pd.DataFrame(ohlcv, columns=["timestamp","open","high","low","close","volume"])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df['symbol'] = symbol
+                return df
+            except Exception as e:
+                logger.warning(f"Fetch candles failed ({symbol}, {tf}) attempt {attempt+1}: {e}")
+                await asyncio.sleep(1.5**attempt + random.random())
         return pd.DataFrame()
 
-    def _add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty:
-            return df
-        ind = self.config.indicators
+    def add_indicators(self, df: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        ind = self.cfg.indicators
         df['ema_short'] = df['close'].ewm(span=ind.ema_short, adjust=False).mean()
+        df['ema_medium'] = df['close'].ewm(span=ind.ema_medium, adjust=False).mean()
         df['ema_long'] = df['close'].ewm(span=ind.ema_long, adjust=False).mean()
-        df['ema_trend'] = df['close'].ewm(span=ind.ema_trend, adjust=False).mean()
         df['rsi'] = ta.momentum.RSIIndicator(df['close'], ind.rsi_period).rsi()
         df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], ind.atr_period).average_true_range()
-
-        # dynamic rsi bands (guard zero-divide)
-        close_mean = df['close'].rolling(14).mean().replace(0, pd.NA)
-        atr_mean = df['atr'].rolling(14).mean().replace(0, pd.NA)
-        ratio = (atr_mean / close_mean).fillna(0)
-        df['rsi_overbought_dyn'] = 70 + (ratio * 50)
-        df['rsi_oversold_dyn'] = 30 - (ratio * 50)
-        df = df.dropna(subset=['ema_short', 'ema_long', 'ema_trend', 'rsi', 'atr'])
+        df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], ind.adx_period).adx()
+        bb = ta.volatility.BollingerBands(df['close'], ind.bb_period, ind.bb_std)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_lower'] = bb.bollinger_lband()
+        df['bb_middle'] = bb.bollinger_mavg()
+        df['bb_trend'] = np.where(df['close'] > df['bb_middle'], 1, -1)
+        df['vol_avg'] = df['volume'].rolling(20).mean()
+        df['vol_ok'] = df['volume'] > df['vol_avg']
+        if df_htf is not None and not df_htf.empty:
+            df['htf_trend'] = np.where(df_htf['close'].iloc[-1] > df_htf['open'].iloc[-1], 1, -1)
+        else:
+            df['htf_trend'] = 0
+        df.dropna(inplace=True)
         return df
 
-    # -----------------------------
-    # SIGNAL GENERATION (keeps your logic)
-    # -----------------------------
-    def generate_signal(self, df: pd.DataFrame, symbol: str) -> Optional[dict]:
-        if df.empty or len(df) < 2:
-            return None
-
-        latest = df.iloc[-1]
-        ind = self.config.indicators
-        trend = "BUY" if latest["ema_short"] > latest["ema_long"] else "SELL"
-
-        rsi_overbought = float(latest.get('rsi_overbought_dyn', ind.rsi_overbought))
-        rsi_oversold = float(latest.get('rsi_oversold_dyn', ind.rsi_oversold))
-        if trend == "BUY" and latest["rsi"] > rsi_overbought:
-            return None
-        if trend == "SELL" and latest["rsi"] < rsi_oversold:
-            return None
-
-        lookback = self.config.smc_lookback_structure
-        if len(df) < lookback + 1:
-            return None
-
-        highs = df['high'].iloc[-(lookback+1):].reset_index(drop=True)
-        lows = df['low'].iloc[-(lookback+1):].reset_index(drop=True)
-        match_count = 0
-        for i in range(1, len(highs)):
-            if trend == "BUY":
-                if highs.iloc[i] > highs.iloc[i-1] and lows.iloc[i] > lows.iloc[i-1]:
-                    match_count += 1
-            else:
-                if lows.iloc[i] < lows.iloc[i-1] and highs.iloc[i] < highs.iloc[i-1]:
-                    match_count += 1
-
-        if (match_count / lookback) < self.config.smc_threshold:
-            return None
-
-        close_mean_14 = df['close'].rolling(14).mean().iloc[-1] if len(df) >= 14 else df['close'].mean()
-        atr_val = float(latest['atr'])
-        atr_ratio = (atr_val / close_mean_14) if close_mean_14 and not math.isnan(close_mean_14) else 0.0
-
-        sl_distance = atr_val * ind.atr_sl_mult * (1 + atr_ratio)
-        tp_distance = atr_val * ind.atr_tp_mult * (1 + atr_ratio)
-        entry = float(latest['close'])
-        if trend == "BUY":
-            sl = entry - sl_distance
-            tp = entry + tp_distance
-            rr = (tp - entry) / abs(entry - sl) if sl != entry else float('nan')
-        else:
-            sl = entry + sl_distance
-            tp = entry - tp_distance
-            rr = (entry - tp) / abs(sl - entry) if sl != entry else float('nan')
-
-        # confidence metric
+    def ai_predict(self, row: pd.Series) -> float:
+        if self.ai_model is None:
+            return 0.5
         try:
-            price_diff_pct = abs(latest['ema_short'] - latest['ema_long']) / latest['close'] * 100 * 10
-            rsi_bonus = 50 if (trend == "BUY" and latest['rsi'] > 50) or (trend == "SELL" and latest['rsi'] < 50) else 0
-            confidence = float(min(max(price_diff_pct + rsi_bonus, 0), 100))
-        except Exception:
-            confidence = 0.0
-
-        if confidence < self.config.confidence_threshold:
-            return None
-
-        signal = {
-            "time": now_utc().isoformat(),
-            "symbol": symbol,
-            "signal": trend,
-            "entry": round(entry, 8),
-            "sl": round(sl, 8),
-            "tp": round(tp, 8),
-            "confidence": round(confidence, 2),
-            "ema_trend": round(float(latest['ema_trend']), 8),
-            "rsi": round(float(latest['rsi']), 2),
-            "candle_time": df.index[-1].to_pydatetime().isoformat(),
-            "rr": round(rr, 2) if not math.isnan(rr) else None
-        }
-
-        # duplicate suppression using store last signals
-        last = None
-        # we keep an in-memory last-signal map (persisted in DB)
-        last_signal = next((s for s in self.local_signals_df.to_dict('records') if s.get('symbol') == symbol), None)
-        if last_signal:
-            last = last_signal
-        if last:
-            same_direction = last['signal'] == signal['signal']
-            small_price_diff = abs(float(last['entry']) - signal['entry']) < 0.001 * signal['entry']
-            similar_confidence = abs(float(last['confidence']) - signal['confidence']) < 1
-            if same_direction and small_price_diff and similar_confidence:
-                return None
-
-        return signal
-
-    # -----------------------------
-    # PERSISTENCE + CSV flush
-    # -----------------------------
-    async def _flush_signals(self):
-        logger.info("Flushing signals to store & CSV")
-        # persist DataFrame rows to sqlite and CSV
-        rows = self.local_signals_df.to_dict('records')
-        if not rows:
-            return
-        for row in rows:
-            try:
-                await self.store.insert_signal(row)
-                await self.store.upsert_last_signal(row['symbol'], row)
-            except Exception as e:
-                logger.exception(f"Failed to persist row {row}: {e}")
-
-        # write CSV atomically
-        csv_text = self.local_signals_df.to_csv(index=False)
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tmp")
-        os.close(tmp_fd)
-        try:
-            async with aiofiles.open(tmp_path, "w") as f:
-                await f.write(csv_text)
-            os.replace(tmp_path, self.config.csv_file)
-            logger.info(f"Wrote CSV to {self.config.csv_file}")
+            features_list = ['ema_short','ema_medium','ema_long','rsi','atr','adx','bb_trend','vol_ok','htf_trend']
+            features = [row[f] for f in features_list if f in row]
+            features = np.array(features).reshape(1, -1)
+            prob = float(self.ai_model.predict_proba(features)[0][1])
+            logger.debug(f"AI prediction: {prob:.2f}")
+            return prob
         except Exception as e:
-            logger.exception(f"Failed to write CSV: {e}")
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
+            logger.error(f"AI prediction failed: {e}")
+            return 0.5
 
-        # clear local buffer
-        self.local_signals_df = self.local_signals_df.iloc[0:0]
+    async def generate_signal(self, symbol: str):
+        async with self.semaphore:
+            df = await self.fetch_candles(symbol, self.cfg.timeframe)
+            df_htf = await self.fetch_candles(symbol, self.cfg.higher_timeframe)
+            if df.empty or df_htf.empty:
+                return
+            df = self.add_indicators(df, df_htf)
+            last_row = df.iloc[-1]
 
-    # -----------------------------
-    # MAIN LOOP
-    # -----------------------------
-    async def _main_loop(self):
-        logger.info("Main loop started")
-        poll = self.config.poll_interval_sec
-        symbols = list(self.config.symbols)
-        # pre-populate last signals from DB
-        try:
-            last_signals = await self.store.get_all_last_signals()
-            for s in last_signals:
-                try:
-                    self.local_signals_df = pd.concat([self.local_signals_df, pd.DataFrame([s])], ignore_index=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            signal_type = None
+            if last_row['close'] > last_row['ema_short'] > last_row['ema_medium']:
+                if confirm_candle(df, "BUY"): signal_type = "BUY"
+            elif last_row['close'] < last_row['ema_short'] < last_row['ema_medium']:
+                if confirm_candle(df, "SELL"): signal_type = "SELL"
+            if not signal_type: return
 
-        while self.running:
-            start = time.time()
-            symbol_tasks = []
-            for symbol in symbols:
-                symbol_tasks.append(asyncio.create_task(self._process_symbol(symbol)))
+            confidence = self.ai_predict(last_row) * 100
+            if confidence < self.cfg.confidence_threshold: return
 
-            # wait for all symbol processing
-            try:
-                await asyncio.gather(*symbol_tasks)
-            except Exception as e:
-                logger.exception(f"Error while gathering symbol tasks: {e}")
+            atr = last_row['atr']
+            entry = last_row['close']
+            if signal_type == "BUY":
+                sl = entry - atr * self.cfg.indicators.atr_sl_mult
+                tp = entry + atr * self.cfg.indicators.atr_tp_mult
+            else:
+                sl = entry + atr * self.cfg.indicators.atr_sl_mult
+                tp = entry - atr * self.cfg.indicators.atr_tp_mult
+            rr = abs((tp - entry) / (entry - sl)) if (entry - sl) != 0 else 0
 
-            # flush buffer periodically or when size reached
-            if len(self.local_signals_df) >= self.config.csv_save_batch:
-                await self._flush_signals()
+            signal_data = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "signal": signal_type,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "confidence": confidence,
+                "rr": rr,
+                "htf_trend": last_row['htf_trend'],
+                "bb_trend": last_row['bb_trend']
+            }
 
-            # ensure fixed poll interval
-            elapsed = time.time() - start
-            to_sleep = max(0.0, poll - elapsed)
-            # sleep in small chunks so we can shutdown quickly
-            slept = 0.0
-            while self.running and slept < to_sleep:
-                await asyncio.sleep(min(1.0, to_sleep - slept))
-                slept += 1.0
+            await self.store.insert_signal(signal_data)
+            self.metrics.update(signal_data)
+            logger.info(f"Signal generated: {signal_data}")
 
-        # final flush on exit
-        await self._flush_signals()
-        logger.info("Main loop stopped")
+            if self.cfg.telegram_bot_token and self.cfg.telegram_chat_id:
+                msg = format_signal_message([signal_data])
+                await send_telegram_message(self.cfg.telegram_bot_token, self.cfg.telegram_chat_id, msg)
 
-    async def _process_symbol(self, symbol: str):
-        # per-symbol rate limiting
-        last_sent = self._symbol_last_sent.get(symbol, 0.0)
-        now = time.time()
-        if now - last_sent < self.config.per_symbol_rate_limit_sec:
-            await asyncio.sleep(self.config.per_symbol_rate_limit_sec - (now - last_sent))
+    async def run(self):
+        await self.store.init_db()
 
-        df = await self.fetch_ohlcv(symbol)
-        if df.empty:
-            return
+        # Start heartbeat task if URL is provided
+        heartbeat_task = None
+        if self.cfg.uptimerobot_url:
+            heartbeat_task = asyncio.create_task(heartbeat_loop(self.cfg.uptimerobot_url, self.cfg.heartbeat_interval))
 
-        signal = self.generate_signal(df, symbol)
-        if signal:
-            logger.info(f"Signal generated: {signal['symbol']} {signal['signal']} entry={signal['entry']} conf={signal['confidence']}")
-            # add to local buffer
-            self.local_signals_df = pd.concat([self.local_signals_df, pd.DataFrame([signal])], ignore_index=True)
-            # persist and update last_signal in DB asynchronously
-            try:
-                await self.store.insert_signal(signal)
-                await self.store.upsert_last_signal(symbol, signal)
-            except Exception as e:
-                logger.exception(f"Failed to persist generated signal: {e}")
+        while self.running_event.is_set():
+            tasks = [self.generate_signal(sym) for sym in self.cfg.symbols]
+            await asyncio.gather(*tasks)
+            await asyncio.sleep(self.cfg.poll_interval)
 
-            # prepare telegram message
-            msg = (f"*{signal['symbol']}* {signal['signal']} @ {signal['entry']}\n"
-                   f"SL: {signal['sl']} | TP: {signal['tp']} | Confidence: {signal['confidence']} | R/R: {signal['rr']}")
-            await self.send_telegram(msg)
-            self._symbol_last_sent[symbol] = time.time()
-            if PROM_AVAILABLE:
-                METRIC_SIGNALS_GENERATED.inc()
+        if heartbeat_task:
+            heartbeat_task.cancel()
+        await self.store.close()
+        await self.exchange.close()
 
-    # -----------------------------
-    # UTIL: Health / Status
-    # -----------------------------
-    def health_status(self) -> dict:
-        return {
-            "running": self.running,
-            "symbols": self.config.symbols,
-            "last_signals_buffered": len(self.local_signals_df),
-            "last_fetch_cache_keys": len(self.ohlcv_cache),
-            "utc_time": now_utc().isoformat()
-        }
-
+    def stop(self):
+        self.running_event.clear()
 
 # -----------------------------
-# FLASK HTTP (health & metrics)
+# Entry Point
 # -----------------------------
-app = Flask(__name__)
-BOT: Optional[ProfessionalSignalBot] = None
-
-@app.route("/")
-def home():
-    return "Professional KuCoin Perpetual Signal Bot is running!", 200
-
-@app.route("/status")
-def status():
-    if not BOT:
-        return jsonify({"error": "bot not started"}), 500
-    return jsonify(BOT.health_status())
-
-@app.route("/heartbeat")
-def heartbeat():
-    logger.info("Heartbeat ping")
-    return "Alive", 200
-
-@app.route("/metrics")
-def metrics():
-    if PROM_AVAILABLE and REG:
-        data = generate_latest(REG)
-        return Response(data, mimetype="text/plain; version=0.0.4; charset=utf-8")
-    return Response("prometheus_client not installed", status=501)
-
-# -----------------------------
-# RUN & SIGNAL HANDLING
-# -----------------------------
-async def run_bot():
-    global BOT
-    cfg = BotConfig()
-    BOT = ProfessionalSignalBot(cfg)
-    await BOT.start()
-
-    # run forever until stopped
-    while BOT.running:
-        await asyncio.sleep(1)
-
-def _start_flask_in_thread():
-    port = int(os.getenv("PORT", "10000"))
-    from threading import Thread
-    Thread(target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False), daemon=True).start()
-
 def main():
-    _start_flask_in_thread()
+    cfg = BotConfig()
+    bot = SignalBot(cfg)
+
     loop = asyncio.get_event_loop()
 
-    main_task = loop.create_task(run_bot())
+    def shutdown_handler(*args):
+        logger.info("Stopping SignalBot gracefully...")
+        bot.stop()
 
-    def _on_exit(signum, frame):
-        logger.info(f"Received signal {signum}, shutting down.")
-        if BOT:
-            loop.create_task(BOT.stop())
-
-    # handle SIGINT/SIGTERM
-    for s in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(s, _on_exit)
+    # Cross-platform signal handling
+    for sig_name in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig_name, shutdown_handler)
+        except NotImplementedError:
+            signal.signal(sig_name, lambda s, f: shutdown_handler())
 
     try:
-        loop.run_until_complete(main_task)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Main loop interrupted")
+        loop.run_until_complete(bot.run())
     finally:
-        # attempt final stop
-        if BOT:
-            loop.run_until_complete(BOT.stop())
         loop.close()
-        logger.info("Exit complete")
 
 if __name__ == "__main__":
     main()

@@ -2,6 +2,7 @@
 ccxt>=2.0.67
 aiohttp>=3.9.5
 aiofiles>=23.1.0
+aiosqlite>=0.18.0      # Required for SQLite
 
 # Data Processing & Indicators
 pandas>=2.1.0
@@ -13,5 +14,9 @@ flask>=2.3.5
 gunicorn>=21.2.0
 python-dotenv>=1.0.0
 
-# Optional Monitoring (safe to remove if not needed)
+# Optional AI Model (only if using xgb_model.pkl)
+xgboost>=1.7.6
+scikit-learn>=1.3.2
+
+# Optional Monitoring
 prometheus-client>=0.20.0
