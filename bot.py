@@ -50,7 +50,7 @@ class BotConfig:
     symbols: List[str] = field(default_factory=lambda: [
         s.strip() for s in os.getenv(
             "SYMBOLS",
-            "BTCUSDT:USDT,ETHUSDT:USDT,SOLUSDT:USDT,ADAUSDT:USDT,XRPUSDT:USDT,XPLUSDT:USDT,INJUSDT:USDT"
+            "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,ADA/USDT:USDT,XRP/USDT:USDT,XPL/USDT:USDT,INJ/USDT:USDT"
         ).split(",")
     ])
     timeframe: str = os.getenv("TIMEFRAME", "1h")

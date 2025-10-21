@@ -16,7 +16,7 @@ import pickle
 # Load environment variables
 # -----------------------------
 load_dotenv()
-SYMBOLS = os.getenv("SYMBOLS", "BTC/USDT,ETH/USDT").split(",")
+SYMBOLS = os.getenv("SYMBOLS", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,INJ/USDT:USDT,ADA/USDT:USDT,XPL/USDT:USDT").split(",")
 TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 HTF_TIMEFRAME = os.getenv("HIGHER_TIMEFRAME", "4h")
 TOTAL_CANDLES = int(os.getenv("TOTAL_CANDLES", 2000))
