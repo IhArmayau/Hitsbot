@@ -371,9 +371,9 @@ async def shutdown_event():
 async def root():
     return {"status": "alive"}
 
-@app.get("/heartbeat")
+@app.api_route("/heartbeat", methods=["GET", "HEAD"])
 async def heartbeat():
-    logger.info("💓 Heartbeat ping received")
+    logger.info("💓 Heartbeat ping received (GET/HEAD)")
     return {"status": "alive"}
 
 @app.get("/stop")
