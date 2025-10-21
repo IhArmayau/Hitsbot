@@ -1,27 +1,25 @@
 #!/bin/bash
 
-# -----------------------------
-# Paths
-# -----------------------------
-MODEL_PATH="./xgb_model.pkl"
+# Use Render's persistent disk path for model and DB
+DATA_DIR="/mnt/data"
+mkdir -p "$DATA_DIR"
 
-# -----------------------------
-# Train model if missing
-# -----------------------------
+# Paths
+MODEL_PATH="$DATA_DIR/xgb_model.pkl"
+DB_PATH="$DATA_DIR/signals.db"
+
+# Export env variables for bot.py
+export ML_MODEL_PATH="$MODEL_PATH"
+export SQLITE_DB="$DB_PATH"
+
+# Check if model exists
 if [ ! -f "$MODEL_PATH" ]; then
     echo "[INFO] Model not found. Training..."
     python train_model.py
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Model training failed. Exiting."
-        exit 1
-    fi
 else
     echo "[INFO] Model already exists. Skipping training."
 fi
 
-# -----------------------------
-# Start FastAPI bot
-# -----------------------------
+# Start the FastAPI bot on the port Render assigns
 echo "[INFO] Starting FastAPI bot..."
-# Replace shell with uvicorn so Render keeps the process alive
-exec uvicorn bot:app --host 0.0.0.0 --port $PORT --reload
+uvicorn bot:app --host 0.0.0.0 --port $PORT
