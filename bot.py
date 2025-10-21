@@ -371,10 +371,12 @@ async def shutdown_event():
 async def root():
     return {"status": "alive"}
 
+from fastapi import Response
+
 @app.api_route("/heartbeat", methods=["GET", "HEAD"])
 async def heartbeat():
     logger.info("💓 Heartbeat ping received (GET/HEAD)")
-    return {"status": "alive"}
+    return Response(content='{"status":"alive"}', media_type="application/json")
 
 @app.get("/stop")
 async def stop_bot():
