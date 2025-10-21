@@ -1,18 +1,27 @@
 #!/bin/bash
 
-# Path to your model
-MODEL_PATH="/mnt/data/xgb_model.pkl"
+# -----------------------------
+# Paths
+# -----------------------------
+MODEL_PATH="./xgb_model.pkl"
 
-# Ensure /mnt/data exists
-mkdir -p /mnt/data
-
-# Check if model exists
+# -----------------------------
+# Train model if missing
+# -----------------------------
 if [ ! -f "$MODEL_PATH" ]; then
-    echo "Model not found. Training..."
+    echo "[INFO] Model not found. Training..."
     python train_model.py
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Model training failed. Exiting."
+        exit 1
+    fi
 else
-    echo "Model already exists. Skipping training."
+    echo "[INFO] Model already exists. Skipping training."
 fi
 
-# Start the FastAPI bot
-uvicorn bot:app --host 0.0.0.0 --port $PORT
+# -----------------------------
+# Start FastAPI bot
+# -----------------------------
+echo "[INFO] Starting FastAPI bot..."
+# Replace shell with uvicorn so Render keeps the process alive
+exec uvicorn bot:app --host 0.0.0.0 --port $PORT --reload
