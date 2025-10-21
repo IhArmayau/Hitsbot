@@ -20,7 +20,7 @@ SYMBOLS = os.getenv("SYMBOLS", "BTC/USDT,ETH/USDT").split(",")
 TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 HTF_TIMEFRAME = os.getenv("HIGHER_TIMEFRAME", "4h")
 TOTAL_CANDLES = int(os.getenv("TOTAL_CANDLES", 2000))
-MODEL_PATH = os.getenv("ML_MODEL_PATH", "xgb_model.pkl")  # Save to project root
+MODEL_PATH = os.getenv("ML_MODEL_PATH", "xgb_model.pkl")  
 
 EMA_SHORT = int(os.getenv("EMA_SHORT", 9))
 EMA_MEDIUM = int(os.getenv("EMA_MEDIUM", 21))
@@ -171,7 +171,7 @@ async def main():
         # Ensure directory exists
         os.makedirs(os.path.dirname(MODEL_PATH) or ".", exist_ok=True)
 
-        # Save model
+        # Save model for bot.py
         with open(MODEL_PATH, "wb") as f:
             pickle.dump(model, f)
         print(f"Model saved to {MODEL_PATH}")

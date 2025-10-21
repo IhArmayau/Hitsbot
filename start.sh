@@ -1,37 +1,29 @@
 #!/bin/bash
+set -e  # Exit immediately if a command fails
+set -o pipefail
 
-# Create persistent data folder
-mkdir -p /opt/render/project/data
+# Ensure Python virtual environment is activated (optional)
+# source .venv/bin/activate
 
-# Path to your model
-MODEL_PATH="/opt/render/project/data/xgb_model.pkl"
-DATA_HASH_FILE="/opt/render/project/data/data_hash.txt"
-
-# Compute current dataset hash
-CURRENT_HASH=$(md5sum signals.csv | awk '{print $1}')
-
-TRAIN_MODEL=false
-
-if [ ! -f "$MODEL_PATH" ]; then
-    echo "[INFO] Model not found. Training..."
-    TRAIN_MODEL=true
-elif [ ! -f "$DATA_HASH_FILE" ]; then
-    TRAIN_MODEL=true
-else
-    OLD_HASH=$(cat "$DATA_HASH_FILE")
-    if [ "$CURRENT_HASH" != "$OLD_HASH" ]; then
-        echo "[INFO] Data changed. Retraining model..."
-        TRAIN_MODEL=true
-    fi
+# Load environment variables
+if [ -f ".env" ]; then
+    export $(grep -v '^#' .env | xargs)
 fi
 
-if [ "$TRAIN_MODEL" = true ]; then
+# Default model path if not set
+ML_MODEL_PATH="${ML_MODEL_PATH:-xgb_model.pkl}"
+
+# Check if model exists
+if [ ! -f "$ML_MODEL_PATH" ]; then
+    echo "[INFO] Model not found at $ML_MODEL_PATH. Training..."
     python train_model.py
-    echo "$CURRENT_HASH" > "$DATA_HASH_FILE"
 else
-    echo "[INFO] Model up-to-date. Skipping training."
+    echo "[INFO] Model already exists at $ML_MODEL_PATH. Skipping training."
 fi
+
+# Default PORT
+PORT="${PORT:-8000}"
 
 # Start the FastAPI bot
-echo "[INFO] Starting FastAPI bot..."
-uvicorn bot:app --host 0.0.0.0 --port $PORT
+echo "[INFO] Starting FastAPI bot on port $PORT..."
+uvicorn bot:app --host 0.0.0.0 --port "$PORT" --reload
