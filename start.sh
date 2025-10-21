@@ -1,25 +1,37 @@
 #!/bin/bash
 
-# Use Render's persistent disk path for model and DB
-DATA_DIR="/mnt/data"
-mkdir -p "$DATA_DIR"
+# Create persistent data folder
+mkdir -p /opt/render/project/data
 
-# Paths
-MODEL_PATH="$DATA_DIR/xgb_model.pkl"
-DB_PATH="$DATA_DIR/signals.db"
+# Path to your model
+MODEL_PATH="/opt/render/project/data/xgb_model.pkl"
+DATA_HASH_FILE="/opt/render/project/data/data_hash.txt"
 
-# Export env variables for bot.py
-export ML_MODEL_PATH="$MODEL_PATH"
-export SQLITE_DB="$DB_PATH"
+# Compute current dataset hash
+CURRENT_HASH=$(md5sum signals.csv | awk '{print $1}')
 
-# Check if model exists
+TRAIN_MODEL=false
+
 if [ ! -f "$MODEL_PATH" ]; then
     echo "[INFO] Model not found. Training..."
-    python train_model.py
+    TRAIN_MODEL=true
+elif [ ! -f "$DATA_HASH_FILE" ]; then
+    TRAIN_MODEL=true
 else
-    echo "[INFO] Model already exists. Skipping training."
+    OLD_HASH=$(cat "$DATA_HASH_FILE")
+    if [ "$CURRENT_HASH" != "$OLD_HASH" ]; then
+        echo "[INFO] Data changed. Retraining model..."
+        TRAIN_MODEL=true
+    fi
 fi
 
-# Start the FastAPI bot on the port Render assigns
+if [ "$TRAIN_MODEL" = true ]; then
+    python train_model.py
+    echo "$CURRENT_HASH" > "$DATA_HASH_FILE"
+else
+    echo "[INFO] Model up-to-date. Skipping training."
+fi
+
+# Start the FastAPI bot
 echo "[INFO] Starting FastAPI bot..."
 uvicorn bot:app --host 0.0.0.0 --port $PORT
