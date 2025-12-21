@@ -1,0 +1,36 @@
+2025-10-18 08:02:24,695 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:02:30,724 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:02:37,759 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:02:41,768 - ERROR - Failed to fetch BTC/USDT after 3 retries
+2025-10-18 08:02:46,809 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:02:52,845 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:02:59,859 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:03:03,864 - ERROR - Failed to fetch ETH/USDT after 3 retries
+2025-10-18 08:03:08,889 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:03:14,909 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:03:21,939 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:03:25,946 - ERROR - Failed to fetch SOL/USDT after 3 retries
+2025-10-18 08:22:18,119 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:22:24,140 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:22:31,183 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:22:35,191 - ERROR - Failed to fetch BTC/USDT after 3 retries
+2025-10-18 08:22:40,223 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:22:46,241 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:22:53,272 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:22:57,280 - ERROR - Failed to fetch ETH/USDT after 3 retries
+2025-10-18 08:23:02,307 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:23:08,333 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:23:15,357 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:23:19,361 - ERROR - Failed to fetch SOL/USDT after 3 retries
+2025-10-18 08:24:24,450 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:24:30,472 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:24:37,499 - WARNING - Network error fetching BTC/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:24:41,505 - ERROR - Failed to fetch BTC/USDT after 3 retries
+2025-10-18 08:24:46,539 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:24:52,559 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:24:59,585 - WARNING - Network error fetching ETH/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:25:03,591 - ERROR - Failed to fetch ETH/USDT after 3 retries
+2025-10-18 08:25:08,616 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 1/3
+2025-10-18 08:25:14,638 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 2/3
+2025-10-18 08:25:21,656 - WARNING - Network error fetching SOL/USDT: mexc GET https://api.mexc.com/api/v3/exchangeInfo, retry 3/3
+2025-10-18 08:25:25,663 - ERROR - Failed to fetch SOL/USDT after 3 retries

@@ -1,0 +1,11 @@
+ccxt==4.3.86
+aiohttp
+pandas
+numpy
+ta
+python-dotenv
+xgboost
+scikit-learn
+fastapi
+uvicorn[standard]
+aiosqlite
